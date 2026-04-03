@@ -1,0 +1,45 @@
+\chapter{Objetivos y alcance}
+
+\section{Objetivo general}
+
+El objetivo principal de este Trabajo de Fin de Máster es el diseño e implementación de un entorno funcional de DevSecOps sobre Kubernetes, integrando mecanismos de seguridad de forma nativa dentro del ciclo de vida del desarrollo y despliegue de aplicaciones.
+
+El núcleo del proyecto se centra en la aplicación del paradigma Policy-as-Code mediante el uso de Admission Controllers, concretamente Kyverno, con el objetivo de garantizar configuraciones seguras en tiempo de despliegue. A diferencia de los enfoques tradicionales basados únicamente en la detección o el bloqueo, este trabajo pone especial énfasis en el uso de políticas de tipo \textit{mutating}, capaces de corregir automáticamente configuraciones inseguras en los manifiestos de Kubernetes.
+
+Esta aproximación permite no solo prevenir errores de configuración, sino también establecer mecanismos de hardening automático, alineados con las prácticas modernas de seguridad en entornos cloud-native.
+
+\section{Objetivos específicos}
+
+Para alcanzar el objetivo general, se definen los siguientes objetivos específicos:
+
+\begin{itemize}
+    \item Desplegar un clúster Kubernetes funcional en un entorno de laboratorio, con una arquitectura basada en un nodo de control y un nodo worker, configurando adecuadamente su comunicación y la capa de red mediante una solución CNI como Calico.
+
+    \item Instalar y configurar Kyverno como motor de políticas de seguridad basado en Policy-as-Code, integrándolo como Admission Controller dentro del clúster.
+
+    \item Definir e implementar un conjunto representativo de políticas de seguridad (entre 5 y 10), centradas en problemáticas reales como:
+    \begin{itemize}
+        \item ejecución de contenedores con privilegios elevados,
+        \item escalada de privilegios,
+        \item ausencia de límites de recursos,
+        \item control de comunicaciones de red.
+    \end{itemize}
+
+    \item Validar el comportamiento de las políticas mediante pruebas prácticas, demostrando tanto el bloqueo de configuraciones inseguras (\textit{validating policies}) como su corrección automática (\textit{mutating policies}).
+
+    \item Implementar una política avanzada basada en la generación automática de Network Policies, con el objetivo de restringir accesos a recursos sensibles, como servicios de metadatos (por ejemplo, la IP 169.254.169.254), habitual en entornos cloud.
+
+    \item Integrar el clúster dentro de un modelo de despliegue continuo basado en GitOps, utilizando ArgoCD para gestionar el estado declarativo de las aplicaciones.
+
+    \item Incorporar un pipeline de integración continua mediante GitHub Actions, incluyendo procesos de construcción y análisis de vulnerabilidades con herramientas como Trivy o Sysdig Secure.
+
+    \item Realizar una comparativa técnica entre Kyverno y OPA Gatekeeper, analizando diferencias en facilidad de uso, capacidades de validación y mutación, y adecuación en entornos productivos.
+\end{itemize}
+
+\section{Alcance del proyecto}
+
+El proyecto se desarrolla en un entorno de laboratorio basado en máquinas virtuales, con el objetivo de reproducir un escenario realista de despliegue en Kubernetes. El alcance incluye la configuración del clúster, la integración de las herramientas principales del pipeline DevSecOps y la implementación de políticas de seguridad representativas.
+
+No obstante, el trabajo no pretende cubrir de manera exhaustiva todos los estándares de seguridad existentes, sino demostrar el funcionamiento y la viabilidad del modelo Policy-as-Code aplicado a Kubernetes mediante casos prácticos.
+
+Asimismo, la utilización de herramientas de automatización como Ansible se considera una posible ampliación del proyecto. Siguiendo un enfoque iterativo, se prioriza inicialmente la implementación de los mecanismos de seguridad y su validación, dejando la automatización completa del despliegue como una línea de trabajo futura o paralela en función del tiempo disponible.
