@@ -1,4 +1,79 @@
 \newglossaryentry{api_rest}{
     name={API REST},
-    description={Interfície de Programació d'Aplicacions basada en el paradigma \textit{Representational State Transfer} (REST), que utilitza el protocol HTTP per facilitar la comunicació entre sistemes i permet realitzar operacions com consultar, crear, modificar i eliminar recursos de manera escalable i eficient}
+    description={Interfaz de Programación de Aplicaciones basada en el paradigma \textit{Representational State Transfer} (REST), que utiliza el protocolo HTTP para facilitar la comunicación entre sistemas y permite realizar operaciones como consultar, crear, modificar y eliminar recursos de manera escalable y eficiente}
+}
+
+\newglossaryentry{gitops}{
+    name={GitOps},
+    description={Paradigma operativo que utiliza repositorios Git como fuente única de verdad para definir y gestionar el estado deseado de la infraestructura y las aplicaciones. Cualquier cambio en el sistema se realiza mediante commits en el repositorio, y un operador automatizado (como ArgoCD) se encarga de sincronizar el estado real del entorno con el estado declarado en Git}
+}
+
+\newglossaryentry{cni}{
+    name={CNI},
+    description={(\textit{Container Network Interface}) Especificación y conjunto de bibliotecas que definen cómo los plugins de red deben configurar las interfaces de red de los contenedores en Kubernetes. Ejemplos de plugins CNI son Calico, Flannel y Cilium}
+}
+
+\newglossaryentry{drift_protection}{
+    name={Drift protection},
+    description={Mecanismo que detecta y corrige automáticamente cualquier desviación entre el estado deseado de un recurso (definido declarativamente) y su estado real en el sistema. En el contexto de Kyverno, se implementa mediante el campo \texttt{synchronize: true} en las políticas de tipo \textit{generate}, que regenera automáticamente los recursos eliminados o modificados de forma no autorizada}
+}
+
+\newglossaryentry{auto_hardening}{
+    name={Auto-hardening},
+    description={Proceso automático de aplicación de configuraciones de seguridad sobre recursos del sistema sin intervención manual del operador o desarrollador. En el contexto de este trabajo, se implementa mediante políticas de mutación de Kyverno que inyectan campos de seguridad en los manifiestos de Kubernetes en el momento del despliegue}
+}
+
+\newglossaryentry{imds}{
+    name={IMDS},
+    description={(\textit{Instance Metadata Service}) Servicio disponible en entornos cloud (AWS, GCP, Azure) accesible desde cualquier instancia a través de la IP de enlace local \texttt{169.254.169.254}. Expone información sensible de la instancia como credenciales IAM temporales, tokens de servicio y configuración de red. Es un vector de ataque habitual en entornos de contenedores comprometidos}
+}
+
+\newglossaryentry{supply_chain_attack}{
+    name={Ataque a la cadena de suministro},
+    description={Tipo de ataque que compromete el software o las herramientas utilizadas durante el proceso de desarrollo o despliegue, en lugar de atacar directamente el sistema objetivo. En entornos CI/CD, puede manifestarse como la manipulación de dependencias, imágenes de contenedores, actions de GitHub o runners de terceros para inyectar código malicioso en el pipeline}
+}
+
+\newglossaryentry{policy_report}{
+    name={PolicyReport},
+    description={Recurso nativo de Kubernetes generado automáticamente por Kyverno que consolida los resultados de la evaluación de políticas sobre los recursos del clúster. Indica qué recursos han pasado, fallado o sido mutados por cada política, con marca temporal de cada evaluación. Existen dos variantes: \texttt{PolicyReport} (con alcance de namespace) y \texttt{ClusterPolicyReport} (con alcance de clúster)}
+}
+
+\newglossaryentry{webhook}{
+    name={Webhook},
+    description={Mecanismo de extensión del API Server de Kubernetes que permite invocar servicios HTTP externos durante el proceso de admisión de recursos. En el contexto de Kyverno, los webhooks de admisión son el canal por el que el API Server delega la evaluación de políticas al motor de Kyverno. Existen dos tipos: \texttt{MutatingWebhookConfiguration} (para políticas de mutación) y \texttt{ValidatingWebhookConfiguration} (para políticas de validación)}
+}
+
+\newglossaryentry{etcd}{
+    name={etcd},
+    description={Base de datos distribuida de tipo clave-valor que actúa como almacén persistente del estado completo del clúster Kubernetes. Todos los objetos del clúster (pods, services, configmaps, políticas, etc.) son persistidos en etcd una vez superado el proceso de admisión. Su consistencia y disponibilidad son críticas para el funcionamiento del clúster}
+}
+
+\newglossaryentry{hardening}{
+    name={Hardening},
+    description={Proceso de reducción de la superficie de ataque de un sistema mediante la eliminación o configuración restrictiva de funcionalidades innecesarias. En el contexto de contenedores Kubernetes, incluye medidas como desactivar la escalada de privilegios, eliminar Linux capabilities no requeridas, forzar la ejecución como usuario no root y restringir el acceso al sistema de ficheros}
+}
+
+\newglossaryentry{cidr}{
+    name={CIDR},
+    description={(\textit{Classless Inter-Domain Routing}) Notación utilizada para definir rangos de direcciones IP. En Kubernetes, los rangos CIDR se utilizan para designar el espacio de direccionamiento de los pods (pod CIDR) y de los servicios (service CIDR). Por ejemplo, \texttt{10.244.0.0/16} define el rango de IPs asignables a los pods cuando se utiliza Calico como plugin CNI}
+}
+
+\newglossaryentry{two_repo_gitops}{
+    name={Patrón de dos repositorios (GitOps)},
+    description={Patrón arquitectónico de GitOps que separa el repositorio de código fuente de la aplicación del repositorio de configuración que contiene los manifiestos de Kubernetes. El pipeline de CI actualiza el repositorio de configuración tras una build exitosa, y ArgoCD sincroniza el clúster con el estado declarado en dicho repositorio. Esta separación mejora la seguridad al limitar los permisos de acceso al clúster y clarifica las responsabilidades de cada componente}
+}
+
+\newglossaryentry{qos_kubernetes}{
+    name={QoS (Kubernetes)},
+    description={(\textit{Quality of Service}) Clasificación que Kubernetes asigna a los pods en función de cómo están definidos sus \texttt{resources.requests} y \texttt{resources.limits}. Existen tres clases: \texttt{Guaranteed} (requests == limits en todos los contenedores — máxima protección frente a evicción), \texttt{Burstable} (requests < limits o solo uno de los dos definido) y \texttt{BestEffort} (ningún campo definido — primera clase en ser eviccionada bajo presión de recursos)}
+}
+
+\newglossaryentry{patchstrategicmerge}{
+    name={patchStrategicMerge},
+    description={Mecanismo de aplicación de parches de Kyverno que realiza una fusión inteligente (\textit{merge}) del objeto Kubernetes original con el parche definido en la política. A diferencia de un reemplazo completo, \texttt{patchStrategicMerge} añade únicamente los campos ausentes y respeta los valores ya declarados explícitamente en el manifiesto original, garantizando que las mutaciones son aditivas y no destructivas}
+}
+
+\newglossaryentry{runner}{
+    name={Runner (GitHub Actions)},
+    description={Agente de ejecución que procesa los jobs definidos en los workflows de GitHub Actions. Puede ser un runner hospedado por GitHub (\textit{hosted runner}) o un runner autogestionado en infraestructura propia (\textit{self-hosted runner}). Los runners ejecutan cada paso del pipeline en un entorno aislado y son el objetivo de ataques de tipo supply chain que buscan comprometer el proceso de build o exfiltrar credenciales del entorno de CI}
 }

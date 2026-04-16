@@ -1,0 +1,289 @@
+\chapter{Diseño de la arquitectura}
+
+El presente capítulo describe el diseño arquitectónico del entorno DevSecOps implementado en este trabajo. Se expone la visión general del sistema, el papel de cada componente, el flujo completo de integración y despliegue continuo con seguridad integrada, la topología de red del clúster de laboratorio y, finalmente, las decisiones de diseño que han guiado la construcción del entorno y las razones técnicas que las justifican.
+
+% ─────────────────────────────────────────────
+\section{Arquitectura general del sistema}
+% ─────────────────────────────────────────────
+
+La arquitectura del sistema se organiza en tres planos funcionales claramente diferenciados: el plano de desarrollo, el plano de automatización y el plano de ejecución. Esta separación no es meramente conceptual, sino que refleja una división real de responsabilidades entre los componentes del sistema y los momentos del ciclo de vida en los que actúa cada uno.
+
+El \textbf{plano de desarrollo} abarca el conjunto de actividades realizadas por el equipo de ingeniería: la escritura de código de aplicación, la definición de manifiestos Kubernetes y la formulación de políticas de seguridad. Toda esta producción se materializa en forma de commits sobre repositorios Git, que constituyen la fuente de verdad del sistema.
+
+El \textbf{plano de automatización} comprende los mecanismos que procesan los cambios introducidos en los repositorios y transforman el código en artefactos desplegables, verificando su seguridad en el proceso. Este plano engloba el pipeline de integración continua gestionado por GitHub Actions, que construye las imágenes de contenedor y las somete a análisis de vulnerabilidades mediante Trivy, y el controlador GitOps implementado por ArgoCD, que detecta las diferencias entre el estado deseado definido en Git y el estado real del clúster y aplica las reconciliaciones necesarias.
+
+El \textbf{plano de ejecución} corresponde al clúster Kubernetes, donde las cargas de trabajo finalmente se despliegan y donde Kyverno actúa como última línea de defensa, interceptando cada solicitud de creación o modificación de recursos para aplicar las políticas de seguridad definidas antes de que cualquier objeto sea persistido en el sistema.
+
+La Figura~\ref{fig:arquitectura-general} ilustra la arquitectura global del sistema, mostrando la relación entre los tres planos y los flujos de información entre ellos.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{arquitectura/fig5-1-arquitectura-general.png}
+\caption{Arquitectura general del entorno DevSecOps}
+\label{fig:arquitectura-general}
+\end{figure}
+
+Un aspecto arquitectónico central es la adopción del \textbf{patrón de dos repositorios} para la implementación del modelo GitOps. El repositorio de aplicación contiene el código fuente de las cargas de trabajo y la lógica de negocio, mientras que el repositorio de configuración —denominado habitualmente \textit{GitOps repo}— almacena los manifiestos de Kubernetes, las políticas de Kyverno y las configuraciones de infraestructura. Esta separación permite que el pipeline de CI modifique únicamente el repositorio de configuración (actualizando la etiqueta de imagen tras una build exitosa) sin que ArgoCD deba tener acceso al código fuente de la aplicación, reduciendo la superficie de ataque y clarificando las responsabilidades de cada componente.
+
+% ─────────────────────────────────────────────
+\section{Descripción de componentes}
+% ─────────────────────────────────────────────
+
+\subsection{Clúster Kubernetes}
+
+El clúster Kubernetes constituye la plataforma de ejecución sobre la que se sustenta el conjunto del sistema. Siguiendo la arquitectura descrita en el Capítulo~4, se compone de dos nodos: un nodo de control (\texttt{192.168.1.101}) y un nodo worker (\texttt{192.168.1.102}), ambos ejecutando Ubuntu Server 24.04 LTS sobre máquinas virtuales VirtualBox.
+
+El \textbf{API Server} es el componente central del plano de control y el único punto de entrada para todas las operaciones sobre el clúster. Todas las herramientas del sistema —ArgoCD, Kyverno, \texttt{kubectl}— interactúan exclusivamente a través del API Server, que expone una API RESTful y aplica los mecanismos de autenticación, autorización y control de admisión sobre cada solicitud recibida \cite{kubernetes_docs}. Es precisamente en este componente donde se registran los webhooks de Kyverno para interceptar el tráfico de admisión.
+
+El almacén \textbf{etcd} persiste el estado completo del clúster en forma de pares clave-valor distribuidos. Ningún recurso llega a etcd sin haber pasado por el proceso completo de admisión, lo que garantiza que el estado persistido siempre cumple las políticas de seguridad definidas.
+
+\subsection{Kyverno}
+
+Kyverno se despliega en el namespace dedicado \texttt{kyverno} y opera mediante cuatro controladores independientes, cada uno con responsabilidades bien delimitadas \cite{kyverno_docs}:
+
+El \textbf{Admission Controller} es el componente crítico para este trabajo. Se registra en el API Server mediante dos objetos de tipo \texttt{Mutating\-Webhook\-Configuration} y \texttt{Validating\-Webhook\-Configuration}, que instruyen al API Server para que derive las solicitudes de admisión hacia Kyverno antes de persistirlas. Este controlador evalúa las políticas de tipo \textit{mutate} y \textit{validate} en tiempo real, con una latencia que debe mantenerse por debajo del umbral de timeout configurado en el webhook (por defecto, 10 segundos).
+
+El \textbf{Background Controller} evalúa políticas sobre recursos ya existentes en el clúster. Esto es especialmente relevante para las políticas de tipo \textit{generate}: cuando se aplica la política \texttt{generate-networkpolicy-metadata}, el Background Controller se encarga de generar retroactivamente las NetworkPolicies en los namespaces que ya existían antes de que la política fuera desplegada.
+
+El \textbf{Reports Controller} genera y mantiene actualizados los recursos \texttt{PolicyReport} y \texttt{ClusterPolicyReport}, que consolidan los resultados de la evaluación de todas las políticas sobre todos los recursos del clúster. Estos informes son fundamentales para la auditoría de cumplimiento.
+
+El \textbf{Cleanup Controller} gestiona la eliminación programada de recursos generados por políticas de tipo \textit{generate} cuando el recurso que los originó es eliminado, manteniendo la coherencia del clúster.
+
+\subsection{ArgoCD}
+
+ArgoCD implementa el paradigma GitOps actuando como operador de reconciliación continua entre el estado declarado en el repositorio de configuración y el estado real del clúster \cite{argocd_docs}. Su arquitectura interna se compone de varios subcomponentes: el \textit{Application Controller} es el núcleo que detecta las diferencias de estado (\textit{diff}) y aplica las reconciliaciones; el \textit{Repo Server} gestiona las conexiones con los repositorios Git y la renderización de los manifiestos; y el \textit{API Server} expone la interfaz de usuario y la API de gestión.
+
+En el contexto de este trabajo, ArgoCD gestiona las políticas de Kyverno como cualquier otro recurso Kubernetes: los objetos \texttt{ClusterPolicy} almacenados en el repositorio de configuración se sincronizan automáticamente al clúster. Esto significa que cualquier modificación de una política —corrección, endurecimiento o nueva política— sigue el mismo flujo de aprobación versionada que cualquier cambio de infraestructura, garantizando trazabilidad completa.
+
+La capacidad de \textit{self-healing} de ArgoCD complementa directamente el mecanismo de \textit{drift protection} de Kyverno: si alguien modifica manualmente una política en el clúster, ArgoCD detecta la desviación y la revierte al estado definido en Git; si alguien elimina una NetworkPolicy generada por Kyverno, el Background Controller de Kyverno la regenera. Ambas capas trabajan de forma coordinada para garantizar que el estado del sistema permanece siempre alineado con el definido en el repositorio.
+
+\subsection{GitHub Actions y Trivy}
+
+GitHub Actions actúa como motor de integración continua, ejecutándose automáticamente ante cada \textit{push} al repositorio de aplicación \cite{github_actions_docs}. El pipeline construye la imagen de contenedor, invoca Trivy para realizar un análisis de vulnerabilidades \cite{trivy_docs} y, únicamente si el análisis no detecta vulnerabilidades críticas, publica la imagen en el registro y actualiza la etiqueta de imagen en el repositorio de configuración.
+
+La seguridad del propio pipeline merece atención específica. La alerta del tutor sobre el ataque del grupo TeamPCP, que comprometió pipelines CI/CD mediante la manipulación de GitHub Actions de terceros \cite{teampcp2026}, motiva dos decisiones de diseño concretas que se detallan en la Sección~\ref{sec:decisiones}: el anclaje de versiones de acciones mediante hash SHA y la limitación de permisos del token del runner al mínimo necesario.
+
+\subsection{Sysdig Secure}
+
+Sysdig Secure aporta la dimensión de seguridad en tiempo de ejecución (\textit{runtime security}) al entorno, complementando los controles preventivos de Kyverno con detección de comportamiento anómalo durante la ejecución de los pods \cite{sysdig_secure}. Como servicio SaaS, su integración con el entorno de laboratorio basado en máquinas virtuales puede presentar limitaciones técnicas, tal como se documenta en el Capítulo~4. No obstante, su rol arquitectónico es relevante: mientras Kyverno actúa en el momento del despliegue, Sysdig Secure actúa durante la ejecución, cubriendo la superficie de ataque que no puede ser controlada estáticamente.
+
+% ─────────────────────────────────────────────
+\section{Flujo de despliegue DevSecOps}
+% ─────────────────────────────────────────────
+
+El flujo completo del sistema puede describirse en dos fases diferenciadas: la fase de integración continua, responsabilidad de GitHub Actions, y la fase de despliegue continuo, responsabilidad de ArgoCD y Kyverno. La separación explícita entre CI y CD es una decisión arquitectónica intencionada que se justifica en la Sección~\ref{sec:decisiones}.
+
+\subsection{Fase de integración continua}
+
+El flujo de CI se inicia cuando un desarrollador realiza un \textit{push} sobre la rama principal del repositorio de aplicación. GitHub Actions detecta el evento y lanza el workflow definido, que ejecuta secuencialmente los siguientes pasos:
+
+En primer lugar, se construye la imagen de contenedor a partir del Dockerfile del repositorio. A continuación, Trivy analiza la imagen resultante en busca de vulnerabilidades conocidas, consultando su base de datos de CVEs. Si el análisis detecta vulnerabilidades de severidad crítica o alta, el pipeline falla en este punto y la imagen no es publicada, impidiendo que código vulnerable llegue al entorno de ejecución. Si el análisis es satisfactorio, la imagen se publica en el registro de contenedores con una etiqueta que incluye el hash del commit, garantizando la trazabilidad entre el artefacto desplegado y el código fuente que lo generó.
+
+El último paso del pipeline de CI actualiza el manifiesto de despliegue en el repositorio de configuración, sustituyendo la etiqueta de imagen anterior por la nueva. Este commit en el repositorio de configuración actúa como señal de disparo para la fase de CD.
+
+La Figura~\ref{fig:flujo-cicd} ilustra este flujo completo de CI/CD.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{arquitectura/fig5-2-flujo-cicd.png}
+\caption{Flujo de integración y despliegue continuo con análisis de seguridad}
+\label{fig:flujo-cicd}
+\end{figure}
+
+\subsection{Fase de despliegue continuo y admisión}
+
+ArgoCD monitoriza el repositorio de configuración de forma periódica. Al detectar el nuevo commit introducido por el pipeline de CI, computa la diferencia entre el manifiesto actualizado y el estado actual del clúster e inicia la sincronización, enviando la solicitud de actualización del recurso al API Server de Kubernetes.
+
+En este punto interviene Kyverno a través del mecanismo de Admission Controllers. El proceso de admisión de Kubernetes sigue una secuencia determinada \cite{kubernetes_docs} que se ilustra en la Figura~\ref{fig:flujo-admision}:
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.90\linewidth]{arquitectura/fig5-3-flujo-admision.png}
+\caption{Flujo de admisión de Kyverno: mutación antes de validación}
+\label{fig:flujo-admision}
+\end{figure}
+
+Tras la autenticación y autorización de la solicitud, el API Server invoca los \textit{mutating admission webhooks} registrados. Kyverno recibe el objeto en su estado original y aplica secuencialmente todas las políticas de tipo \textit{mutate} activas: inyecta los límites y solicitudes de recursos (P4), completa el \texttt{securityContext} del contenedor con las configuraciones seguras faltantes (P5), fuerza el sistema de ficheros de solo lectura (P6) y añade las etiquetas de trazabilidad (P7). El objeto devuelto al API Server es ya la versión enriquecida con todas las configuraciones de seguridad.
+
+A continuación, el API Server invoca los \textit{validating admission webhooks}. Kyverno evalúa las políticas de tipo \textit{validate} sobre el objeto ya mutado. Dado que la mutación ha aplicado previamente las configuraciones seguras, la gran mayoría de pods pasan esta validación sin rechazo. Las políticas de validación actúan como última barrera para casos que la mutación no puede resolver: el uso de imágenes de registros no autorizados (P3), la ejecución explícita como usuario root cuando el desarrollador lo ha especificado de forma deliberada (P1) o la solicitud explícita de escalada de privilegios (P2). Si alguna política de validación rechaza el objeto, el API Server devuelve un error con el mensaje definido en la política y el recurso no es persistido en etcd.
+
+Si el objeto supera todos los webhooks de admisión, es persistido en etcd, el Scheduler determina en qué nodo debe ejecutarse y el kubelet del nodo worker procede con la creación del pod.
+
+\section{Arquitectura de red del clúster}
+
+La topología de red del entorno de laboratorio se articula en tres capas, tal como muestra la Figura~\ref{fig:red-cluster}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\linewidth]{arquitectura/fig5-4-red-cluster.png}
+\caption{Arquitectura de red del clúster de laboratorio}
+\label{fig:red-cluster}
+\end{figure}
+
+La \textbf{capa de gestión} corresponde a la red \textit{host-only} de VirtualBox (\texttt{192.168.1.0/24}), mediante la cual la máquina anfitriona y ambos nodos del clúster se comunican. Los nodos tienen direcciones IP estáticas asignadas: \texttt{192.168.1.101} para el nodo de control y \texttt{192.168.1.102} para el nodo worker. Toda comunicación interna del clúster —entre el API Server y los kubelets, entre el API Server y los controladores de Kyverno y ArgoCD— transita por esta red. Adicionalmente, cada nodo dispone de una interfaz NAT de VirtualBox que proporciona acceso a internet, utilizada para la descarga de imágenes de contenedor y la comunicación con servicios externos como GitHub o registros de imágenes.
+
+La \textbf{capa de pods} está gestionada por Calico \cite{calico_docs}, que asigna un espacio de direccionamiento privado (\texttt{172.16.0.0/16}) a los pods del clúster. Calico implementa las Network Policies de Kubernetes mediante reglas de \texttt{iptables} o eBPF, en función de la configuración, garantizando que las restricciones de tráfico definidas en las políticas se aplican de forma efectiva. Esta implementación es un requisito para la política P8 del trabajo: la NetworkPolicy generada por Kyverno para bloquear el acceso al servicio de metadatos cloud (\texttt{169.254.169.254/32}) solo tiene efecto si el plugin CNI subyacente respeta y aplica las Network Policies de Kubernetes, condición que Calico cumple de forma nativa.
+
+La \textbf{capa de servicios} utiliza el espacio de direccionamiento \texttt{10.96.0.0/12}, reservado por kubeadm para los objetos \texttt{Service} de tipo \texttt{ClusterIP}. Los servicios de los componentes del sistema —API Server (\texttt{10.96.0.1}), ArgoCD Server, Kyverno— son accesibles dentro del clúster a través de este espacio de direcciones, mientras que el acceso externo al API Server se realiza directamente a través de la IP del nodo de control mediante el puerto 6443.
+
+% ─────────────────────────────────────────────
+\section{Decisiones de diseño}
+\label{sec:decisiones}
+% ─────────────────────────────────────────────
+
+Las decisiones arquitectónicas adoptadas en el diseño del sistema no son arbitrarias, sino que responden a requisitos técnicos y de seguridad concretos. Esta sección documenta las más relevantes y justifica cada una de ellas.
+
+\subsection{Separación entre CI y CD}
+
+La separación entre integración continua (GitHub Actions) y despliegue continuo (ArgoCD) es una decisión arquitectónica deliberada, en lugar de un único pipeline que construye y despliega en una sola secuencia. Esta separación ofrece varias ventajas. En primer lugar, desacopla las credenciales necesarias: el pipeline de CI necesita acceso al registro de imágenes y al repositorio de configuración, pero no al clúster Kubernetes; ArgoCD tiene acceso al clúster pero no al código fuente. Esta segregación reduce el radio de impacto de un posible compromiso de cualquiera de los dos componentes. En segundo lugar, permite aplicar controles de seguridad en el límite entre ambas fases: la imagen solo es publicada si pasa el análisis de Trivy, y ArgoCD solo despliega lo que está en el repositorio de configuración, que actúa como punto de control auditado.
+
+\subsection{Alcance de ClusterPolicy frente a Policy}
+
+Kyverno permite definir políticas con alcance de clúster (\texttt{ClusterPolicy}) o con alcance de namespace (\texttt{Policy}). En este trabajo se utilizan exclusivamente \texttt{ClusterPolicy}, lo que garantiza que las políticas de seguridad se aplican a todos los namespaces del clúster sin excepciones. Una política namespaced podría ser inadvertidamente omitida al crear un nuevo namespace, creando una brecha de cobertura. El uso de \texttt{ClusterPolicy} implementa el principio de \textit{secure by default}: la seguridad se aplica en todas partes a menos que sea explícitamente excluida mediante reglas de excepción documentadas.
+
+\subsection{Modo Enforce frente a Audit}
+
+Kyverno permite operar en dos modos: \texttt{Enforce}, que bloquea activamente los recursos que incumplen las políticas, y \texttt{Audit}, que permite el despliegue pero registra las infracciones en los PolicyReports. En este trabajo, las políticas de validación operan en modo \texttt{Enforce}, lo que garantiza que ningún recurso no conforme llega al clúster. Aunque en un entorno de producción real suele recomendarse comenzar en modo \texttt{Audit} para evitar interrupciones, en el contexto de este entorno de laboratorio el modo \texttt{Enforce} es el que permite demostrar de forma efectiva el mecanismo de bloqueo y su efecto real sobre los despliegues.
+
+\subsection{Mutación antes de validación como estrategia de hardening}
+
+El orden de ejecución de los webhooks de Kubernetes —mutación antes de validación— se aprovecha deliberadamente como estrategia de \textit{hardening} automático. Las políticas de mutación no son complementos opcionales, sino el mecanismo principal de seguridad del sistema: en lugar de rechazar pods con configuraciones incompletas (lo que generaría fricción para los desarrolladores), Kyverno los completa automáticamente con el perfil de seguridad correcto. Las políticas de validación actúan únicamente sobre las configuraciones que no pueden resolverse mediante mutación, como el uso de registros de imágenes no autorizados o la presencia de privilegios explícitamente declarados.
+
+Esta estrategia alinea seguridad y usabilidad: el desarrollador puede trabajar con manifiestos mínimos y obtener un pod correctamente securizado sin necesidad de conocer en detalle todos los campos de seguridad de Kubernetes. La responsabilidad del cumplimiento recae en la plataforma, no en el desarrollador.
+
+\subsection{synchronize: true en políticas de generación}
+
+La política P8 utiliza el campo \texttt{synchronize: true} en su definición de tipo \textit{generate}. Esta configuración instruye al Background Controller de Kyverno para que monitorice los recursos generados y los recree automáticamente si son eliminados o modificados de forma no autorizada. Esta decisión implementa el principio de \textit{drift protection} a nivel de recursos de seguridad: la NetworkPolicy que bloquea el acceso al IMDS no puede ser eliminada de forma permanente por un operador (intencionada o accidentalmente), ya que Kyverno la regenerará en cuestión de segundos. Sin este campo, la generación sería un evento único y la protección podría ser eludida.
+
+\subsection{Seguridad de la cadena de suministro del pipeline}
+
+El compromiso del grupo TeamPCP sobre pipelines CI/CD \cite{teampcp2026} ilustra que el propio pipeline de automatización puede convertirse en vector de ataque. En respuesta a esta amenaza, el diseño del pipeline adopta dos medidas concretas. La primera es el anclaje de versiones de las GitHub Actions utilizadas mediante su hash SHA completo, en lugar de etiquetas flotantes como \texttt{@latest} o \texttt{@v3}, que pueden ser redirigidas a versiones maliciosas sin modificar el nombre de la referencia. La segunda es la configuración del token de GitHub con permisos mínimos (\textit{least privilege}): el runner solo dispone de los permisos estrictamente necesarios para su función, limitando el impacto de un posible compromiso del entorno de ejecución.
+
+\subsection{Elección de Calico como plugin CNI}
+
+La elección de Calico \cite{calico_docs} frente a alternativas como Flannel o Weave responde a un requisito funcional directo: la política P8 requiere que las Network Policies de Kubernetes sean aplicadas efectivamente por el plugin CNI. Flannel, por ejemplo, no implementa soporte para Network Policies de forma nativa. Calico, en cambio, es uno de los plugins CNI de referencia en entornos de producción y proporciona una implementación completa del modelo de Network Policy de Kubernetes, garantizando que las reglas de bloqueo de tráfico generadas por Kyverno tienen efecto real sobre la comunicación de red de los pods.
+
+% ─────────────────────────────────────────────
+% DIAGRAMAS MERMAID — EXPORTAR A PNG Y GUARDAR EN images/arquitectura/
+% ─────────────────────────────────────────────
+%
+% FIGURA 5.1 — Arquitectura general (guardar como: images/arquitectura/fig5-1-arquitectura-general.png)
+%
+% flowchart TB
+%     subgraph PLANO_DEV["Plano de Desarrollo"]
+%         direction LR
+%         DEV["👤 Desarrollador"]
+%         APP_REPO["📁 Repositorio\nde Aplicación\n(GitHub)"]
+%         CFG_REPO["📁 Repositorio\nde Configuración\n(GitOps repo)"]
+%     end
+%
+%     subgraph PLANO_AUTO["Plano de Automatización"]
+%         direction LR
+%         GA["⚙️ GitHub Actions\n(CI Pipeline)"]
+%         TRIVY["🔍 Trivy\nVulnerability Scanner"]
+%         REGISTRY["📦 Registro\nde Imágenes"]
+%         ARGO["🔄 ArgoCD\n(CD GitOps)"]
+%     end
+%
+%     subgraph PLANO_EXEC["Plano de Ejecución — Clúster Kubernetes"]
+%         subgraph CP["Control Plane · 192.168.1.101"]
+%             API["API Server"]
+%             ETCD[("etcd")]
+%             KYVERNO["🛡️ Kyverno\nAdmission Controller"]
+%         end
+%         subgraph WK["Worker · 192.168.1.102"]
+%             PODS["🟢 Pods\n(securizados)"]
+%         end
+%     end
+%
+%     DEV -->|"git push"| APP_REPO
+%     DEV -->|"git push policies"| CFG_REPO
+%     APP_REPO -->|"trigger"| GA
+%     GA --> TRIVY
+%     TRIVY -->|"imagen limpia"| REGISTRY
+%     GA -->|"actualiza imagen tag"| CFG_REPO
+%     CFG_REPO -->|"detecta cambios"| ARGO
+%     ARGO -->|"kubectl apply"| API
+%     API --> KYVERNO
+%     KYVERNO -->|"objeto mutado\n+ validado"| ETCD
+%     ETCD --> PODS
+%
+%
+% FIGURA 5.2 — Flujo CI/CD (guardar como: images/arquitectura/fig5-2-flujo-cicd.png)
+%
+% flowchart LR
+%     DEV["👤 Developer\ngit push"] --> APP_REPO["App Repo\nGitHub"]
+%     APP_REPO -->|"workflow trigger"| GA["GitHub Actions"]
+%
+%     subgraph CI["── Integración Continua ──"]
+%         GA --> BUILD["Build\nDocker Image"]
+%         BUILD --> SCAN["Trivy Scan"]
+%         SCAN -->|"CRITICAL found"| FAIL["❌ Pipeline fail\nNo push"]
+%         SCAN -->|"clean"| PUSH["Push image\nregistry:sha-abc123"]
+%         PUSH --> UPDATE["Update GitOps repo\nimage: registry:sha-abc123"]
+%     end
+%
+%     subgraph CD["── Despliegue Continuo ──"]
+%         UPDATE --> ARGO["ArgoCD\ndetects diff"]
+%         ARGO -->|"out of sync"| SYNC["Sync to cluster"]
+%         SYNC --> K8S["Kubernetes API\n+ Kyverno"]
+%         K8S --> POD["✅ Pod running\n(auto-hardened)"]
+%     end
+%
+%
+% FIGURA 5.3 — Flujo de admisión Kyverno (guardar como: images/arquitectura/fig5-3-flujo-admision.png)
+%
+% sequenceDiagram
+%     participant C as ArgoCD / kubectl
+%     participant A as API Server
+%     participant M as Mutating Webhook\n(Kyverno)
+%     participant V as Validating Webhook\n(Kyverno)
+%     participant E as etcd
+%
+%     C->>A: Solicitud de recurso (Pod / Namespace)
+%     A->>A: Authn + Authz
+%     A->>M: MutatingAdmissionWebhook
+%     note over M: P4: inyecta resources\nP5: inyecta securityContext\nP6: readOnlyRootFilesystem\nP7: añade labels
+%     M-->>A: Objeto mutado (enriquecido)
+%     A->>V: ValidatingAdmissionWebhook
+%     note over V: P1: runAsRoot?\nP2: privilegeEscalation?\nP3: registro no autorizado?
+%     alt Recurso admitido
+%         V-->>A: ✅ Admitido
+%         A->>E: Persistir en etcd
+%         A-->>C: 201 Created
+%     else Recurso rechazado
+%         V-->>A: ❌ Denied — [mensaje política]
+%         A-->>C: 403 Forbidden
+%     end
+%
+%
+% FIGURA 5.4 — Arquitectura de red (guardar como: images/arquitectura/fig5-4-red-cluster.png)
+%
+% flowchart TB
+%     HOST["🖥️ Host Machine\nWindows 11 · VirtualBox"]
+%
+%     subgraph HOSTONLYNET["Red Host-Only · 192.168.1.0/24"]
+%         CP["Control Plane\n192.168.1.101\nUbuntu 24.04"]
+%         WK["Worker\n192.168.1.102\nUbuntu 24.04"]
+%     end
+%
+%     subgraph NATNET["NAT (acceso internet)"]
+%         GH["GitHub / Registros"]
+%     end
+%
+%     subgraph PODNET["Red de Pods · Calico\n172.16.0.0/16"]
+%         P1["Pod A · 10.244.1.x"]
+%         P2["Pod B · 10.244.2.x"]
+%     end
+%
+%     subgraph SVCNET["Red de Servicios\n10.96.0.0/12"]
+%         SVC["ClusterIP Services\nAPI Server: 10.96.0.1"]
+%     end
+%
+%     HOST --- HOSTONLYNET
+%     CP <-->|"puerto 6443 API\npuerto 10250 kubelet"| WK
+%     CP --- NATNET
+%     WK --- NATNET
+%     WK --- PODNET
+%     PODNET --- SVCNET
+%     CP --- SVCNET

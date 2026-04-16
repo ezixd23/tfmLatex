@@ -20,7 +20,7 @@
 \addbibresource{references.bib} % El fitxer .bib amb les referències
 
 % Carregar les definicions del glossari des d'un fitxer extern
-%\input{glossary}
+\input{glossary.tex}
 
 % Aplicar l'estil personalitzat
 \setglossarystyle{altlist}
@@ -31,6 +31,8 @@
 % Reduir espai abans i després de cada capítol
 \titleformat{\chapter}[block]{\normalfont\fontsize{18pt}{0pt}\bfseries}{\thechapter}{1em}{}
 \titlespacing*{\chapter}{0pt}{0pt}{\baselineskip}
+\titlespacing*{\section}{0pt}{1.5ex plus .2ex}{0.8ex}
+\titlespacing*{\subsection}{0pt}{1.5ex plus .2ex}{0.8ex}
 
 \titleformat{\section}[block]{\normalfont\fontsize{16pt}{0pt}\bfseries}{\thesection}{1em}{}
 \titleformat{\subsection}[block]{\normalfont\fontsize{14pt}{0pt}\bfseries}{\thesubsection}{1em}{}
@@ -119,6 +121,7 @@
 \onehalfspacing % Interlineat de 1,5
 \setlength{\parskip}{12pt} % Espaiat anterior als paràgrafs
 
+\glsaddall
 \printglossary
 
 \begin{comment}
@@ -152,6 +155,9 @@
 \input{chapters/01_introduccion}
 \input{chapters/02_estado_arte}
 \input{chapters/03_objetivos}
+\input{chapters/04_metodologia.tex}
+\input{chapters/05_arquitectura.tex}
+\input{chapters/06_implementacion.tex}
 \cleardoublepage % Garanteix que la bibliografia comenci en una pàgina imparell
 \phantomsection % Marca la pàgina correcta per a la taula de continguts
 \addcontentsline{toc}{chapter}{Bibliografia} % Afegeix la bibliografia al ToC

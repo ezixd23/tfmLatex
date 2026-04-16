@@ -1,0 +1,124 @@
+\chapter{Metodología del proyecto}
+
+El presente capítulo describe el enfoque metodológico adoptado para llevar a cabo el Trabajo de Fin de Máster. No se trata de un capítulo técnico, sino de una descripción razonada de cómo se ha planificado el trabajo, qué decisiones se han tomado respecto al alcance y la organización del proyecto, y qué criterios han guiado la selección de herramientas y la definición de las fases de desarrollo. Muchas de estas decisiones han sido consensuadas con el tutor, Josep Andreu, a lo largo de distintas reuniones y comunicaciones que han servido para ajustar progresivamente el enfoque del trabajo.
+
+% ─────────────────────────────────────────────
+\section{Enfoque general del proyecto}
+% ─────────────────────────────────────────────
+
+El proyecto adopta un enfoque de \textbf{investigación aplicada con desarrollo práctico}. El objetivo no es realizar una revisión teórica exhaustiva de los estándares de seguridad en Kubernetes, sino construir un entorno funcional real que demuestre cómo integrar la seguridad de forma automatizada dentro del ciclo de vida del desarrollo y el despliegue. Los resultados se validan empíricamente a través de pruebas controladas sobre el entorno implementado, no mediante análisis bibliográfico.
+
+El tutor orientó el trabajo hacia un número manejable de entre cinco y diez políticas de seguridad bien elegidas, con el argumento de que demostrar el funcionamiento y la comprensión profunda de Kyverno es más valioso académicamente que aplicar un estándar completo de forma superficial. Esta directriz ha marcado toda la planificación del proyecto: se prioriza la calidad y la justificación de cada decisión sobre la cantidad de elementos implementados.
+
+El desarrollo sigue un modelo \textbf{iterativo e incremental}: se comienza con los componentes más fundamentales (el clúster y Kyverno), se valida cada elemento antes de añadir el siguiente, y se avanza progresivamente hacia los componentes de mayor complejidad (ArgoCD, GitHub Actions, comparativa con OPA). Este modelo permite detectar problemas de integración de forma temprana y garantiza que el entorno es funcional en todo momento, incluso antes de estar completo.
+
+% ─────────────────────────────────────────────
+\section{Entorno de laboratorio}
+% ─────────────────────────────────────────────
+
+El entorno sobre el que se desarrolla el proyecto consiste en un clúster Kubernetes desplegado sobre dos máquinas virtuales proporcionadas por el tutor, gestionadas con VirtualBox. Esta decisión fue consensuada durante el intercambio inicial con Josep Andreu, quien recomendó utilizar las imágenes de las máquinas empleadas en la asignatura para garantizar coherencia y estabilidad.
+
+Las dos máquinas virtuales tienen los siguientes roles y direcciones IP fijas dentro de la red del laboratorio:
+
+\begin{itemize}
+    \item \textbf{Nodo de control} (\textit{control plane}): \texttt{192.168.1.101}, hostname \texttt{control}. Aloja el plano de control de Kubernetes y actúa como punto de entrada para todas las operaciones de administración del clúster.
+    \item \textbf{Nodo worker}: \texttt{192.168.1.102}, hostname \texttt{worker}. Ejecuta las cargas de trabajo desplegadas en el clúster.
+\end{itemize}
+
+Cada máquina virtual está configurada con dos interfaces de red: una de tipo NAT para el acceso a internet, y una de tipo \textit{Host-only Adapter} para la comunicación interna entre nodos. La capa de red del clúster se implementa mediante \textbf{Calico v3.28} \cite{calico_docs}, un plugin CNI que permite definir y aplicar efectivamente Network Policies, lo cual es un requisito para una de las políticas de seguridad implementadas en el proyecto.
+
+La elección de un entorno virtualizado local, en lugar de un proveedor cloud, responde a criterios de control y reproducibilidad. No obstante, esta decisión tiene implicaciones sobre el alcance del trabajo, que se detallan al final de este capítulo.
+
+% ─────────────────────────────────────────────
+\section{Fases del proyecto}
+% ─────────────────────────────────────────────
+
+El proyecto se organiza en cinco fases secuenciales. Cada fase tiene un alcance delimitado y no se avanza a la siguiente hasta verificar que la anterior es funcional.
+
+\subsection{Fase 1: Aprovisionamiento del clúster Kubernetes}
+
+La primera fase comprende la puesta en marcha del clúster Kubernetes sobre las dos máquinas virtuales del laboratorio. Incluye la inicialización del nodo de control, la incorporación del nodo worker y la instalación del plugin de red Calico. El resultado esperado es un clúster operativo con ambos nodos activos y todos los componentes del sistema en funcionamiento.
+
+\subsection{Fase 2: Despliegue e integración de Kyverno}
+
+La segunda fase introduce Kyverno como motor de políticas de seguridad dentro del clúster. Kyverno se instala como un conjunto de controladores que se integran en el mecanismo de Admission Controllers de Kubernetes, interceptando las solicitudes al API Server para aplicar las políticas definidas. Esta fase también incluye la verificación de que los webhooks de Kyverno están correctamente registrados y operativos antes de proceder con la implementación de políticas.
+
+\subsection{Fase 3: Implementación de políticas de seguridad}
+
+La tercera fase constituye el núcleo del trabajo. Se diseña e implementa un conjunto de políticas de seguridad que cubren los tres tipos de acción disponibles en Kyverno: validación, mutación y generación. Las políticas se aplican de forma incremental, comenzando por las más simples (validación de configuraciones inseguras) y avanzando hacia las de mayor complejidad (mutación automática de manifiestos y generación de recursos derivados).
+
+\subsection{Fase 4: Integración GitOps con ArgoCD}
+
+Una vez que las políticas están validadas y operativas, la cuarta fase introduce ArgoCD para gestionar el estado del clúster de forma declarativa a través de un repositorio Git. Todas las configuraciones — políticas de Kyverno, manifiestos de prueba y configuraciones de infraestructura — se almacenan en Git, y ArgoCD garantiza que el estado del clúster se mantiene sincronizado con el repositorio. Esta fase demuestra el ciclo GitOps completo: cualquier cambio en el repositorio se propaga automáticamente al clúster, y cualquier desviación manual es detectada y revertida.
+
+\subsection{Fase 5: Integración CI/CD con GitHub Actions y Trivy}
+
+La quinta fase incorpora la dimensión de integración continua al entorno DevSecOps. Se configura un pipeline en GitHub Actions que ejecuta automáticamente un análisis de vulnerabilidades sobre las imágenes de contenedores utilizadas, empleando Trivy como motor de escaneo. Esta fase cierra el ciclo DevSecOps completo e introduce además la consideración de los riesgos de la propia cadena de suministro del pipeline, motivada por la alerta del tutor sobre el ataque del grupo TeamPCP, que comprometió pipelines CI/CD mediante la manipulación de actions y runners de terceros \cite{teampcp2026}.
+
+% ─────────────────────────────────────────────
+\section{Selección y alcance de las políticas de seguridad}
+% ─────────────────────────────────────────────
+
+El conjunto de políticas implementadas no pretende cubrir de forma exhaustiva todos los controles de seguridad existentes para Kubernetes. Siguiendo la orientación del tutor, se han seleccionado entre cinco y diez políticas que ilustran los diferentes mecanismos de acción de Kyverno y que corresponden a problemáticas de seguridad reales y bien documentadas.
+
+Las políticas seleccionadas abordan las siguientes categorías de riesgo:
+
+\begin{itemize}
+    \item Ejecución de contenedores con el usuario root
+    \item Escalada de privilegios en tiempo de ejecución
+    \item Uso de imágenes procedentes de registros no autorizados
+    \item Ausencia de límites de recursos (CPU y memoria)
+    \item Configuración insegura del contexto de seguridad del contenedor
+    \item Acceso de escritura al sistema de ficheros del contenedor
+    \item Acceso al servicio de metadatos de instancia cloud (IP 169.254.169.254)
+\end{itemize}
+
+La última política — el bloqueo del acceso al servicio de metadatos cloud — fue propuesta explícitamente por el tutor como ejemplo ilustrativo del mecanismo de generación de Kyverno. Mediante una política de tipo \textit{generate}, Kyverno crea automáticamente una NetworkPolicy en cada namespace nuevo del clúster que impide el acceso a dicha IP. Si la NetworkPolicy es eliminada manualmente, Kyverno la regenera de forma automática, demostrando el concepto de protección frente a desviaciones de configuración (\textit{drift protection}).
+
+Adicionalmente, el tutor señaló el interés de incorporar validación de imágenes mediante firma digital con herramientas como Cosign o Notary, así como el uso del contexto \texttt{imageRegistry} de Kyverno para inspeccionar metadatos de imágenes. Estas funcionalidades se contemplan como una posible ampliación del trabajo si el tiempo disponible lo permite, pero no forman parte del alcance comprometido.
+
+% ─────────────────────────────────────────────
+\section{Reporting y observabilidad del sistema}
+% ─────────────────────────────────────────────
+
+El tutor indicó expresamente que el reporting es un valor añadido relevante para el proyecto. Kyverno genera automáticamente recursos \texttt{PolicyReport} y \texttt{ClusterPolicyReport} que consolidan los resultados de la evaluación de políticas sobre todos los recursos del clúster. Estos informes permiten conocer, de forma centralizada, qué recursos cumplen cada política, cuáles han sido mutados automáticamente y cuáles han sido rechazados.
+
+La revisión y documentación de estos informes forma parte del plan de validación del sistema y se incluirá como evidencia en el capítulo de resultados. Este mecanismo aporta una dimensión de auditoría y compliance que complementa las pruebas funcionales individuales y demuestra la aplicabilidad del sistema en entornos reales donde la trazabilidad de las evaluaciones de seguridad es un requisito.
+
+% ─────────────────────────────────────────────
+\section{Estrategia de validación}
+% ─────────────────────────────────────────────
+
+La validación del sistema se realiza mediante pruebas controladas sobre el entorno de laboratorio. Para cada política implementada se ejecuta al menos un escenario de prueba que demuestra su comportamiento con evidencia documental directa: salidas de comandos, estados del sistema y capturas del entorno.
+
+Las pruebas se organizan en tres categorías:
+
+\begin{itemize}
+    \item \textbf{Pruebas de bloqueo}: se intenta desplegar un recurso que infringe una política de validación y se verifica que el API Server lo rechaza con el mensaje de error correspondiente.
+    \item \textbf{Pruebas de mutación}: se despliega un recurso con una configuración incompleta o mínima y se comprueba que Kyverno ha aplicado automáticamente los campos de seguridad esperados, sin que el desarrollador haya tenido que especificarlos.
+    \item \textbf{Pruebas de generación}: se crea un namespace y se verifica tanto la generación automática de la NetworkPolicy asociada como su regeneración tras un borrado manual, demostrando el mecanismo de \textit{drift protection}.
+\end{itemize}
+
+Adicionalmente, se ejecuta una prueba integral que despliega un pod con configuración mínima y verifica que el conjunto de políticas de mutación activas lo transforma en un pod con perfil de seguridad completo. Esta prueba constituye la demostración más representativa del concepto central del trabajo: el \textit{auto-hardening} automático y transparente para el desarrollador.
+
+% ─────────────────────────────────────────────
+\section{Comparativa con OPA Gatekeeper}
+% ─────────────────────────────────────────────
+
+El proyecto incluye una comparativa práctica entre Kyverno y OPA Gatekeeper. Para ello, se reimplementarán en OPA un subconjunto representativo de las políticas ya definidas en Kyverno, con el objetivo de ilustrar las diferencias en sintaxis, capacidades y facilidad de uso. La comparativa no busca determinar cuál herramienta es superior en términos absolutos, sino evaluar cuál se adapta mejor a las necesidades concretas de un entorno DevSecOps automatizado donde la mutación y la generación de recursos son requisitos clave.
+
+Este ejercicio práctico complementa la comparativa teórica del capítulo 2 y permite extraer conclusiones fundamentadas en la experiencia directa con ambas herramientas.
+
+% ─────────────────────────────────────────────
+\section{Decisiones de alcance y limitaciones previstas}
+% ─────────────────────────────────────────────
+
+A lo largo del proceso de planificación, se han tomado varias decisiones explícitas sobre el alcance del proyecto que conviene documentar:
+
+\textbf{Sysdig Secure.} El tutor advirtió que Sysdig Secure es un servicio SaaS que ha presentado históricamente problemas de integración con máquinas virtuales, requiriendo en ocasiones el uso de infraestructura cloud para funcionar correctamente. Se contempla su integración si resulta viable con el entorno de laboratorio, pero se acepta de antemano que puede ser necesario documentar la limitación y sustituirla por un análisis de las capacidades de seguridad en tiempo de ejecución que la herramienta ofrecería en un entorno cloud real.
+
+\textbf{Ansible.} Aunque existe interés en incorporar Ansible para automatizar el provisionamiento del clúster y la instalación de los componentes, el tutor recomendó abordarlo únicamente si el resto del trabajo está completo. Ansible se contempla como una ampliación opcional que no condiciona la entrega principal del proyecto.
+
+\textbf{Validación avanzada de imágenes.} Las funcionalidades de verificación de firmas digitales (Cosign, Notary) y de inspección de metadatos mediante \texttt{imageRegistry} quedan fuera del alcance comprometido, aunque se incluirán si el tiempo lo permite. Su ausencia no afecta a la demostración del modelo Policy-as-Code, que queda suficientemente cubierta por el conjunto de políticas principal.
+
+Estas decisiones reflejan una planificación realista orientada a garantizar un entregable sólido dentro del tiempo disponible, en lugar de abarcar un alcance excesivo con riesgo de quedarse incompleto.
