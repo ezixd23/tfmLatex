@@ -1,0 +1,445 @@
+\chapter{GitOps Integration with ArgoCD}
+
+This chapter documents the implementation of the Continuous Deployment layer of the DevSecOps environment, materialised through ArgoCD as the GitOps controller. Up to this point, Kyverno policies have been managed via direct \texttt{kubectl apply}, which implies that the cluster state and the state declared in the manifests are not continuously linked: any manual modification in the cluster can diverge from the desired state without any mechanism detecting or correcting it. This chapter implements the continuous synchronisation plane announced in Section~5.1, closing the DevSecOps architecture with the layer that connects the Git repository as the single source of truth with the real state of the cluster.
+
+The chapter is organised into six sections. The first describes the GitOps repository design and the decision on its structure. The second documents ArgoCD's deployment in the cluster, including a relevant technical incident during installation. The third covers the creation of the \texttt{Application} that places Kyverno policies under declarative management, and the fourth documents a technical finding about the friction between defaults injected by Kyverno and ArgoCD's comparison engine. The fifth section collects three \textit{drift protection} tests that empirically demonstrate the ArgoCD\,+\,Kyverno complementarity thesis of Chapter~5. The sixth section extends the GitOps architecture to a real workload, and the chapter concludes with a technical analysis of the interaction between Kyverno's \textit{mutating webhooks} and ArgoCD's comparison engine, directly addressing the permanent \textit{drift} risk warned about by the official documentation. The integration with the Continuous Integration plane, which will materialise the two-repository pattern described theoretically in Section~5.1, is addressed in Chapter~8 through the incorporation of the GitHub Actions pipeline.
+
+% ─────────────────────────────────────────────
+\section{GitOps repository design}
+% ─────────────────────────────────────────────
+
+The GitOps repository design requires a prior architectural decision: the number of repositories that will structure the system. Section~5.1 theoretically described the \textit{two-repository pattern} ---one for application source code and another for Kubernetes configuration--- as the usual solution in production environments. Within the scope of this chapter, where the Continuous Integration pipeline has not yet been incorporated, a single repository is used ---called \texttt{tfm-gitops}--- which contains the Kyverno policies and demo application manifests, organised using folders that preserve the conceptual separation between planes. This structure will be expanded in Chapter~8 with the introduction of the second repository (\texttt{tfm-demo-app}), which will host the application source code and Dockerfile. The Continuous Integration pipeline will build the image from that second repository and update the image tag in \texttt{tfm-gitops}, materialising the complete two-repository pattern announced in the architecture.
+
+The final repository structure, visible in Figure~\ref{fig:repo-estructura}, reflects three independent functional planes:
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.70\linewidth]{actions/bloque1_estructuraInicial.png}
+\caption{Structure of the \texttt{tfm-gitops} repository with separation by functional planes}
+\label{fig:repo-estructura}
+\end{figure}
+
+\begin{itemize}
+  \item \texttt{policies/}: contains the eight \texttt{ClusterPolicy} manifests (P1--P8) and the \texttt{kustomization.yaml} file that groups them.
+  \item \texttt{applications/demo-app/}: contains the demonstrative workload manifests (Namespace, Deployment, Service) and their own \texttt{kustomization.yaml}.
+  \item \texttt{argocd/}: contains \texttt{Application} type manifests that define how ArgoCD should manage each of the previous planes.
+\end{itemize}
+
+The \texttt{kustomization.yaml} file in the \texttt{policies/} folder plays a central role in the ArgoCD integration. Kustomize \cite{kustomize_docs} is a native Kubernetes grouping mechanism that ArgoCD recognises automatically: when pointing an \texttt{Application} to a directory containing a \texttt{kustomization.yaml}, ArgoCD renders all listed resources and manages them as a logical unit. This avoids the need to individually reference each policy file in the ArgoCD configuration. Figure~\ref{fig:kustomization} shows the file content, listing the eight manifests in sequential order.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\linewidth]{actions/bloque1_kustomization.png}
+\caption{\texttt{kustomization.yaml} file in the \texttt{policies/} folder with all eight policies}
+\label{fig:kustomization}
+\end{figure}
+
+% ─────────────────────────────────────────────
+\section{ArgoCD deployment}
+% ─────────────────────────────────────────────
+
+ArgoCD is installed in the cluster by applying the official manifests in the dedicated namespace \texttt{argocd}:
+
+\begin{lstlisting}
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+\end{lstlisting}
+
+\subsection{Incident during installation: annotation size limit on CRDs}
+
+During the first execution of the above command, an error occurred that prevented the registration of the \texttt{ApplicationSet} CRD:
+
+\begin{lstlisting}
+The ApplicationSet "applicationsets.argoproj.io" is invalid:
+metadata.annotations: Too long: may not be more than 262144 bytes
+\end{lstlisting}
+
+The root cause of this error lies in the \textit{client-side apply} mechanism used by default by \texttt{kubectl apply}: when applying a resource, \texttt{kubectl} serialises the complete manifest and stores it in the annotation \texttt{kubectl.kubernetes.io/\allowbreak{}last-applied-configuration} of the object. The OpenAPI schema of the \texttt{ApplicationSet} CRD exceeds the 256~KB limit imposed by Kubernetes for an individual annotation value, making it impossible to complete the operation through the standard mechanism.
+
+The solution is to reinstall the manifests using \textit{server-side apply} \cite{kubernetes_ssa}, which delegates the \textit{merge} logic to the API Server instead of storing it in the client annotation:
+
+\begin{lstlisting}
+kubectl apply -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml \
+  --server-side --force-conflicts
+\end{lstlisting}
+
+The \texttt{-{}-force-conflicts} flag is necessary because some manifest fields may have ended up in an inconsistent \textit{field manager} state after the first partially completed attempt. With \textit{server-side apply}, the \texttt{last-applied-configuration} field is not used and the CRD is correctly registered regardless of the size of its schema.
+
+\subsection{Deployment verification}
+
+After reinstallation, verification of pod state in the \texttt{argocd} namespace confirms that ArgoCD's seven components are active, as shown in Figure~\ref{fig:argo-pods}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque2_verificaionPodsArgo.png}
+\caption{ArgoCD's seven components in \texttt{Running} state in the \texttt{argocd} namespace}
+\label{fig:argo-pods}
+\end{figure}
+
+The seven pods correspond to the components described in Section~5.2.3: \texttt{application-cont\-roller} (continuous cluster state reconciliation), \texttt{applicationset-controller} (generation of \texttt{Application} objects from templates), \texttt{dex-server} (federated authentication), \texttt{notifications-controller} (alerts and notifications), \texttt{redis} (internal state cache), \texttt{repo-server} (Git repository cloning and rendering) and \texttt{server} (ArgoCD API and UI).
+
+Verification of registered CRDs confirms that the three ArgoCD resource types are available in the cluster, as seen in Figure~\ref{fig:argo-crds}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{actions/bloque2_CRDSregistrados.png}
+\caption{ArgoCD CRDs registered in the cluster: \texttt{applications}, \texttt{applicationsets} and \texttt{appprojects}}
+\label{fig:argo-crds}
+\end{figure}
+
+The ArgoCD dashboard (version~3.3.8) is accessible through port \texttt{8080} of the control node via exposure of the \texttt{argocd-server} service. Figure~\ref{fig:argo-dashboard} shows the initial interface state before registering any \texttt{Application}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque2_dashboard.png}
+\caption{ArgoCD v3.3.8 interface accessible at \texttt{https://192.168.1.101:8080}}
+\label{fig:argo-dashboard}
+\end{figure}
+
+% ─────────────────────────────────────────────
+\section{Application for Kyverno policies}
+\label{sec:app-policies}
+% ─────────────────────────────────────────────
+
+An \texttt{Application} is ArgoCD's central CRD \cite{argocd_docs}: it represents the minimum unit of declarative management and encapsulates three elements ---the Git source of the manifests, the destination in the cluster where they should be deployed and the synchronisation policy that defines how and when to synchronise. The manifest \texttt{app-policies.yaml}, shown in Figure~\ref{fig:app-policies-yaml}, defines the \texttt{Application} that places the eight Kyverno policies under GitOps management.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.70\linewidth]{actions/bloque3_app-policies.png}
+\caption{Manifest \texttt{app-policies.yaml}: Application managing Kyverno's ClusterPolicies}
+\label{fig:app-policies-yaml}
+\end{figure}
+\vspace{-\parskip}
+
+Each manifest field responds to a justified technical decision:
+
+\begin{itemize}
+  \item \texttt{finalizers: resources-finalizer.\allowbreak{}argocd.argoproj.io}: activates \textit{cascade delete}, so that when the ArgoCD \texttt{Application} is deleted, the synchronised resources in the cluster are also deleted. Guarantees that no orphan policies remain if the \texttt{Application} is removed.
+  \item \texttt{automated.prune:\,true}: enables the automatic deletion of resources that exist in the cluster but have been removed from Git. Without this field, ArgoCD would detect the divergence but would not act, requiring manual intervention.
+  \item \texttt{automated.selfHeal:\,true}: activates the automatic detection and reversal of manual modifications made directly on cluster resources. This field is the heart of the complementarity thesis with Kyverno formulated in Section~5.2.3: while Kyverno protects generated resources (NetworkPolicies), ArgoCD protects the very sources of that generation (ClusterPolicies).
+  \item \texttt{syncOptions.ServerSideApply:\,true}: delegates resource \textit{merge} to the API Server, avoiding the annotation size problem described in the previous section and being consistent with the installation of ArgoCD's own manifests.
+  \item \texttt{syncOptions.CreateNamespace:\,true}: allows ArgoCD to create the destination namespace if it does not exist, although in this case the \texttt{kyverno} namespace was already created by Kyverno's prior installation.
+\end{itemize}
+
+\subsection{Deployment and synchronisation process}
+
+Before applying the \texttt{Application}, the policies previously deployed via direct \texttt{kubectl apply} are removed from the cluster, so that the subsequent deployment unequivocally demonstrates that ArgoCD is the sole provisioning source:
+
+\begin{lstlisting}
+kubectl delete clusterpolicies --all
+kubectl apply -f ~/tfm-gitops/argocd/app-policies.yaml
+\end{lstlisting}
+
+Figure~\ref{fig:app-policies-sync} shows the observed sequence of states: immediately after the manifest is applied, the \texttt{Application} \texttt{kyverno-policies} appears in \texttt{OutOfSync}~+~\texttt{Healthy} state, indicating that ArgoCD has detected the divergence between the repository (which contains the eight policies) and the cluster (which at that moment has none). In the next reconciliation cycle, ArgoCD synchronises the state and the \texttt{Application} transitions to \texttt{Synced}~+~\texttt{Healthy}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque3_aplicacionEstado.png}
+\caption{State transition \texttt{OutOfSync} \textrightarrow{} \texttt{Synced} after first deployment of \texttt{kyverno-policies}}
+\label{fig:app-policies-sync}
+\end{figure}
+
+Verification that the eight policies have been restored and are managed by ArgoCD is carried out in two steps. The first confirms the \texttt{Ready} state of the eight \texttt{ClusterPolicies}, as shown in Figure~\ref{fig:policies-regeneradas}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque3_policiesGeneradasDeNuevo.png}
+\caption{The eight ClusterPolicies restored by ArgoCD in \texttt{Ready} state}
+\label{fig:policies-regeneradas}
+\end{figure}
+\vspace{-\parskip}
+
+\begin{sloppypar}
+The second step verifies that the \textit{ownership} of each policy is established through ArgoCD's traceability annotation. Figure~\ref{fig:argo-anotacion} shows that the \texttt{disallow-root} policy contains the annotation \path{argocd.argoproj.io/tracking-id:kyverno-policies:kyverno.io/ClusterPolicy:/disallow-root}, which unequivocally establishes that this resource is managed by the \texttt{Application} \texttt{kyverno-policies}.
+\end{sloppypar}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque3_anotacionesArgoCD.png}
+\caption{ArgoCD \textit{ownership} annotation in the \texttt{disallow-root} ClusterPolicy}
+\label{fig:argo-anotacion}
+\end{figure}
+\vspace{-\parskip}
+
+ArgoCD's graphical interface, shown in Figure~\ref{fig:argo-arbol}, presents the tree of synchronised resources: the \texttt{Application} \texttt{kyverno-policies} with its eight dependent \texttt{ClusterPolicy} objects, all in \texttt{Synced} state. The commit associated with the last successful synchronisation is visible in the status panel, confirming that the Git repository is the source of truth.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque3_arbolPolicies.png}
+\caption{Tree view in ArgoCD: eight ClusterPolicies synchronised from the Git repository}
+\label{fig:argo-arbol}
+\end{figure}
+\vspace{-\parskip}
+
+The end-to-end functional test, shown in Figure~\ref{fig:pod-bloqueado-argo}, confirms that the policies managed by ArgoCD are functionally equivalent to those deployed manually: the attempt to create a pod without \texttt{runAsNonRoot} is rejected by Kyverno's webhook with the same message as in Chapter~6 tests.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{actions/bloque3_podBloqueado.png}
+\caption{End-to-end verification: insecure pod blocked by ArgoCD-managed policies}
+\label{fig:pod-bloqueado-argo}
+\end{figure}
+\vspace{-\parskip}
+
+% ─────────────────────────────────────────────
+\section{Managing false drift from Kyverno defaults}
+\label{sec:ignore-differences}
+% ─────────────────────────────────────────────
+
+After the first successful deployment of the \texttt{Application} \texttt{kyverno-policies}, an unexpected behaviour was observed: the \texttt{Application} periodically reverted to \texttt{OutOfSync} state despite no changes having been made either in Git or in the cluster. Analysis of the ArgoCD diff revealed the root cause: Kyverno itself applies a \textit{mutating webhook} on \texttt{ClusterPolicy} type resources at admission time, injecting default values into fields not specified in the Git manifests. Affected fields include \texttt{spec.\allowbreak{}validationFailureAction} (when not explicitly declared in some policy), \texttt{spec.\allowbreak{}rules[*].skipBackgroundRequests} and \texttt{spec.\allowbreak{}rules[*].allowExistingViolations}.
+
+This situation is an example of what ArgoCD's documentation calls \textit{false drift} \cite{argocd_diffing}: the state in the cluster differs from the state in Git, but the difference is not the result of an unauthorised modification but of internal system behaviour. From ArgoCD's perspective, the resource in the cluster has additional fields or fields with different values than those declared in Git, which triggers the \texttt{selfHeal} mechanism unnecessarily, creating an unstable reconciliation loop.
+
+\subsection{Evaluation of resolution options}
+
+In this situation there are two resolution strategies:
+
+\begin{enumerate}
+  \item \textbf{Add default values to the manifests in Git}: explicitly declare in each manifest the fields that Kyverno injects, so that the Git state and the cluster state match exactly.
+  \item \textbf{Configure \texttt{ignoreDifferences} in the \texttt{Application}}: instruct ArgoCD to ignore certain fields when performing the comparison, preserving the Git manifests in their minimal form.
+\end{enumerate}
+
+The first option has a significant operational disadvantage: the default values injected by Kyverno are version-dependent. A Kyverno update that changes existing defaults or adds new fields would require updating all Git manifests synchronously, creating an unnecessary coupling between the engine version and the policy manifests. This dependency violates the separation of responsibilities principle underlying the GitOps pattern: Git should contain the operator's \textit{intent}, not an exact mirror of the system's internal state.
+
+The second option, \texttt{ignoreDifferences} \cite{argocd_diffing}, allows expressing exactly this distinction: the ignored fields are internal management fields of the engine, not attributes of the policy declared by the operator. This strategy is adopted by adding the following block to the \texttt{app-policies.yaml} manifest:
+
+\begin{lstlisting}
+ignoreDifferences:
+- group: kyverno.io
+  kind: ClusterPolicy
+  jqPathExpressions:
+  - .spec.rules[] | .skipBackgroundRequests
+  - .spec.rules[] | .allowExistingViolations
+  - .spec.rules[] | .validate? | .allowExistingViolations?
+  - .spec.validationFailureAction
+\end{lstlisting}
+
+The \texttt{jqPathExpressions} use \texttt{jq} syntax to reference fields that should be excluded from comparison. The use of \texttt{?.} in \texttt{.validate?} avoids errors in \textit{mutate} or \textit{generate} rules where the \texttt{validate} field does not exist. After applying this configuration and re-synchronising, the \texttt{Application} remains stably in \texttt{Synced}~+~\texttt{Healthy} state, confirmed by the commit ``fix: ignore Kyverno-injected defaults in ArgoCD diff'' visible in the last synchronisation panel of Figure~\ref{fig:argo-arbol}.
+
+% ─────────────────────────────────────────────
+\section{Drift protection tests}
+% ─────────────────────────────────────────────
+
+With the \texttt{Application} \texttt{kyverno-policies} stable, three tests are executed that empirically demonstrate the complementarity between ArgoCD and Kyverno as \textit{drift protection} mechanisms at different architectural planes. Kyverno's mechanism, documented in Section~6.5 of the previous chapter, protects the resources \textit{generated} by the policies (NetworkPolicies). ArgoCD's mechanism documented below protects the source policies themselves.
+
+\subsection{Self-healing upon manual modification}
+
+The first test simulates an internal actor --- a cluster administrator with direct \texttt{kubectl} access --- modifying a policy to weaken security controls. The scenario is realistic: in an environment without GitOps, this modification would be permanent and might go unnoticed. With ArgoCD and \texttt{selfHeal:\,true}, the cluster automatically reconciles with the Git declarative state.
+
+The test modifies the \texttt{message} field of the \texttt{disallow-root} policy via \texttt{kubectl edit}, replacing the original text with the marker \texttt{DRIFT TEST - manually modified message}. Although modifying the error message does not affect validation logic, the change is sufficient for ArgoCD to detect the divergence. Figure~\ref{fig:prueba1-modificacion} shows two consecutive queries: the first confirms that the modification was correctly applied (the mutated message appears in the three contexts generated by autogen); the second, executed moments later, shows that the message has returned to the original value \texttt{Containers must not run as root}, confirming that ArgoCD has reverted the change.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque4_prueba1ModificadoPolicy.png}
+\caption{Test 1: manual modification reverted by ArgoCD via \texttt{selfHeal}}
+\label{fig:prueba1-modificacion}
+\end{figure}
+
+In this experiment, the reversal occurred within seconds. Although the Git repository \textit{polling} interval is configured by default to 3~minutes, ArgoCD maintains in parallel a continuous \textit{watch} over synchronised resources via the Kubernetes API, allowing it to detect cluster changes almost in real time and initiate the reconciliation cycle immediately without waiting for the next Git \textit{polling} cycle.
+
+\subsection{Policy deployment via Git commit}
+
+The second test demonstrates the GitOps flow in the downstream direction: Git as a provisioning mechanism without direct cluster access. A new policy, \texttt{disallow-latest-tag}, is created that rejects pods whose images are tagged with \texttt{:latest} --- a practice that prevents deployment reproducibility by referring to an image whose content can change without notice. The policy is created directly in the repository's \texttt{policies/} directory, referenced in \texttt{kustomization.yaml} and uploaded via commit and push to the remote repository.
+
+Figure~\ref{fig:prueba2-commit} shows the complete process: file creation, \texttt{kustomiza\-tion.yaml} modification, commit and push. The commit message, \texttt{feat: add disallow-latest-tag policy in kustomization.yaml}, documents the change's intent.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque4_prueba2CreacionyCommitNuevaPolicy.png}
+\caption{Test 2: new policy created via Git commit}
+\label{fig:prueba2-commit}
+\end{figure}
+\vspace{-\parskip}
+
+Figure~\ref{fig:prueba2-desplegada} confirms that the \texttt{disallow-latest-tag} policy has been deployed in the cluster by ArgoCD without any direct intervention, with an age of 2~minutes and 42~seconds compared to the other policies that have been active for over an hour. The \texttt{BACKGROUND:\,false} field reflects that this policy, due to its exclusion condition-based design, does not generate retroactive evaluations on existing pods.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{actions/bloque4_prueb2PolicyDesplegada.png}
+\caption{Test 2: \texttt{disallow-latest-tag} automatically deployed by ArgoCD (2m42s age)}
+\label{fig:prueba2-desplegada}
+\end{figure}
+\vspace{-\parskip}
+
+ArgoCD's interface, shown in Figure~\ref{fig:prueba2-ui}, reflects the updated tree with nine \texttt{ClusterPolicies} --- the new policy appears as an additional node in the graph with a timestamp of 2~minutes ago, while the rest has been synchronised for over an hour.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque4_prueba2AparicionUI.png}
+\caption{Test 2: ArgoCD tree updated with the new \texttt{disallow-latest-tag} policy}
+\label{fig:prueba2-ui}
+\end{figure}
+\vspace{-\parskip}
+
+\subsection{Protection against deletion}
+
+The third test verifies that ArgoCD automatically restores a policy deleted directly from the cluster. This scenario complements the Kyverno \textit{drift protection} test documented in Section~6.5, where it was demonstrated that the Background Controller restores the \texttt{block-cloud-metadata} NetworkPolicy generated by P8. In this case, the deletion affects the source policy that generates it.
+
+The \texttt{disallow-root} policy is deleted via \texttt{kubectl delete clusterpolicy\allowbreak disallow-root}. Figure~\ref{fig:prueba3-eliminacion} shows the sequence: the deletion is confirmed with the message \texttt{clusterpolicy.\allowbreak kyverno.\allowbreak io "disallow-root" deleted}; the immediate subsequent query returns an empty result. However, 48~seconds later, a new query shows the policy again in \texttt{Ready} state, with an age of 48~seconds compared to the minutes of the others, confirming that ArgoCD has recreated it.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{actions/bloque4_prueba3ProteccionAnteEliminacion.png}
+\caption{Test 3: \texttt{disallow-root} policy restored by ArgoCD 48~s after manual deletion}
+\label{fig:prueba3-eliminacion}
+\end{figure}
+
+The combination of the three tests demonstrates that the system operates with two orthogonal protection layers: ArgoCD guarantees that policies defined in Git always exist and are not modified; Kyverno guarantees that resources generated by those policies (NetworkPolicies) cannot be deleted or modified either. The removal of either protection layer does not completely compromise system security, but does reduce its resilience surface.
+
+% ─────────────────────────────────────────────
+\section{Application for the demo workload}
+% ─────────────────────────────────────────────
+
+The GitOps architecture implemented up to this point manages only the platform policy plane. To complete the two-plane architecture described in Section~5.1 and demonstrate that the system works in an integrated manner for real workloads, a second \texttt{Application} is implemented that deploys a demo application managed declaratively from the same GitOps repository.
+
+\subsection{Demo application design}
+
+The chosen base image is \texttt{nginxinc/nginx-unprivileged:1.27-alpine}, available on \texttt{docker.io} under the \texttt{nginxinc/} prefix that satisfies policy P3 (\texttt{restrict-image-regist\-ries}). The \textit{unprivileged} variant of the official nginx image is specifically designed to run without root privileges: the nginx process listens on port~8080 instead of port~80 (which would require \texttt{CAP\_NET\_BIND\_SERVICE}) and runs with UID~101, being compatible with policy P1 (\texttt{disallow-root}) without additional configuration.
+
+The demo application manifests are three:
+
+\textbf{Namespace} (\texttt{namespace.yaml}): declares the \texttt{demo-app} namespace with identification labels. The label \texttt{purpose:\,tfm-demo} is relevant because its existence activates policy P8 (\texttt{generate-networkpolicy-metadata}), which will automatically generate the IMDS blocking NetworkPolicy as soon as the namespace is created.
+
+\textbf{Deployment} (\texttt{deployment.yaml}), whose content is shown in Figure~\ref{fig:demo-deployment}: specifies 2~replicas of the \texttt{nginx-unprivileged} image, the pod-level \texttt{securityContext} with \texttt{runAsNonRoot:\,true} and \texttt{runAsUser:\,101}, and three \texttt{emptyDir} volume mounts --- \texttt{/tmp}, \texttt{/var/cache/nginx} and \texttt{/var/run}. The inclusion of these three volumes directly responds to policy P6 (\texttt{add-readonly-rootfs}), which forces the root filesystem to read-only mode: nginx requires writing PID files to \texttt{/var/run}, cache files to \texttt{/var/cache/nginx} and temporary files to \texttt{/tmp}, and without the corresponding volumes the process would fail to start. This configuration materialises the lesson documented in Section~6.4.3: the policy is not weakened, but rather forces the developer to be explicit about their application's write requirements.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.70\linewidth]{actions/bloque5_deploymnet.png}
+\caption{Demo application \texttt{deployment.yaml} manifest with three \texttt{emptyDir} volumes}
+\label{fig:demo-deployment}
+\end{figure}
+\vspace{-\parskip}
+
+\textbf{Service} (\texttt{service.yaml}): exposes the application via a \texttt{ClusterIP} that maps port~80 to the container's port~8080, with an additional \texttt{NodePort} configured at \texttt{8888} for laboratory access.
+
+\subsection{Application manifest and deployment}
+
+The manifest \texttt{app-demo.yaml}, shown in Figure~\ref{fig:app-demo-yaml}, defines the ArgoCD \texttt{Application} for the workload. There is a deliberate design difference compared to \texttt{app-policies.yaml}: the \texttt{selfHeal} field is configured to \texttt{false}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.70\linewidth]{actions/bloque5_app-demo.png}
+\caption{Manifest \texttt{app-demo.yaml}: Application for the workload with \texttt{selfHeal:\,false}}
+\label{fig:app-demo-yaml}
+\end{figure}
+
+This decision reflects an important operational distinction between the two managed planes. Security policies are platform assets whose integrity is critical: any deviation from their declarative state in Git constitutes a potential security posture degradation and must be automatically reverted. Workload resources, on the other hand, may be temporarily modified by the operations team for diagnostics, by auto-scaling scripts or by other cluster controllers without representing a security problem. The \texttt{selfHeal:\,false} delegates to the team the decision of when to reconcile, maintaining declarative control (Git as source of truth) but without the automatic reversal that can interfere with legitimate operations.
+
+After applying the manifest, ArgoCD detects the divergence between the repository and the cluster (which does not yet contain any resources from the \texttt{demo-app} namespace) and proceeds with synchronisation. Figure~\ref{fig:demo-argocd} shows the resulting resource tree: the \texttt{Application} \texttt{demo-app} manages the Namespace, Service and Deployment, which in turn generates a ReplicaSet with two active Pods.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque5_argocd-demo-app.png}
+\caption{Resource tree of the \texttt{demo-app} Application: Namespace, Service, Deployment and two Pods}
+\label{fig:demo-argocd}
+\end{figure}
+
+\subsection{Verification of Kyverno mutations}
+
+Figure~\ref{fig:demo-outputs} shows the integrated verification of the effects of mutation policies on the demo application pods.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque5_ouputsP4P7P8.png}
+\caption{Verification of mutations P4, P7 and P8 on the demo application pods}
+\label{fig:demo-outputs}
+\end{figure}
+
+The query \texttt{kubectl get networkpolicies -n demo-app} confirms that the NetworkPolicy \texttt{block-cloud-metadata} has been automatically generated by P8 in the \texttt{demo-app} namespace at the moment of its creation, without any manual intervention. The NetworkPolicy has existed for 44~minutes, an identical period to the rest of the namespace resources, confirming that generation occurred immediately.
+
+The query of the following command:
+
+\begin{lstlisting}
+kubectl get pods -n demo-app -o yaml | grep -A 6 "resources:"
+\end{lstlisting}
+
+shows that all containers in the ReplicaSet pods have injected \texttt{limits} (cpu:\,500m, memory:\,256Mi) and \texttt{requests} (cpu:\,100m, memory:\,128Mi) fields by policy P4, despite the Deployment declared in Git specifying no \texttt{resources} field. The count of four \texttt{resources} blocks is due to the \texttt{grep} command capturing all occurrences of the \texttt{resources:} pattern in the pod's YAML manifest ---both in \texttt{spec.containers} (the desired specification) and in \texttt{status.containerStatuses} (the actual state reported by the kubelet)---, repeated for the two active pods in the ReplicaSet.
+
+The query \texttt{kubectl get pods -n demo-app -{}-show-labels} confirms the presence of the labels \texttt{security.tfm/\allowbreak hardened-by:\,\allowbreak kyverno} and \texttt{security.tfm/\allowbreak policy-version:\,\allowbreak v1.0} injected by P7 on both pods, alongside the Deployment's own labels (\texttt{app:\,\allowbreak demo-app}, \texttt{pod-template-hash}).
+The HTTP verification, shown in Figure~\ref{fig:nginx-ok}, confirms that the application is functionally correct despite the complete set of applied security restrictions: nginx responds correctly at \texttt{192.168.1.101:8888}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{actions/bloque5_outputNgnixFuncionando.png}
+\caption{Demo application accessible and functional at \texttt{192.168.1.101:8888} with all policies active}
+\label{fig:nginx-ok}
+\end{figure}
+
+Figure~\ref{fig:dos-applications} shows the final ArgoCD panel state with both \texttt{Application} objects ---\texttt{demo-app} and \texttt{kyverno-policies}--- both in \texttt{Healthy}~+~\texttt{Synced} state, materialising the two-plane GitOps architecture described in Chapter~5.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{actions/bloque5_dosAplications.png}
+\caption{Final ArgoCD panel state: two Applications in Healthy and Synced state}
+\label{fig:dos-applications}
+\end{figure}
+
+% ─────────────────────────────────────────────
+\section{Analysis: interaction between mutating webhooks and ArgoCD}
+\label{sec:argocd-mutating}
+% ─────────────────────────────────────────────
+
+ArgoCD's official documentation explicitly warns that the presence of \textit{mutating admission controllers} in the cluster can generate permanent \textit{drift} \cite{argocd_diffing}: if a webhook modifies a resource after ArgoCD has synchronised it, the state in the cluster will differ from the state in Git indefinitely, chronically maintaining the \texttt{Application} in \texttt{OutOfSync} state. The prescribed solution is the \texttt{ignoreDifferences} or \texttt{ServerSideApply} options. Section~\ref{sec:ignore-differences} already documented the application of this solution for the case of defaults injected by Kyverno on the \texttt{ClusterPolicies} themselves. This section analyses whether the same problem manifests for the mutations Kyverno applies to the demo application pods.
+
+\subsection{Observed behaviour: absence of drift in the demo Application}
+
+The \texttt{Application} \texttt{demo-app} remains stably in \texttt{Synced}~+~\texttt{Healthy} state, as confirmed by Figure~\ref{fig:escenario1-sync}, despite its pods being mutated by the four policies P4--P7. This result, which might seem counterintuitive given the documentation warning, has a precise technical explanation.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{actions/bloque5_escenario1Sync.png}
+\caption{Both Applications in Synced and Healthy state: pod mutation does not generate drift in ArgoCD}
+\label{fig:escenario1-sync}
+\end{figure}
+
+ArgoCD compares resources at the same hierarchical level at which they are declared in Git. The repository contains a resource of type \texttt{Deployment}, not \texttt{Pod} resources directly. Kyverno's mutations ---P4 (resources), P5 (securityContext), P6 (readOnlyRootFilesystem) and P7 (labels)--- are applied to the \texttt{Pod} at the time of its creation by the ReplicaSet, not to the \texttt{spec.template} field of the \texttt{Deployment}. ArgoCD compares the \texttt{Deployment} declared in Git with the \texttt{Deployment} existing in the cluster, and these match. The \texttt{Pod} resources generated as child resources are not directly managed by ArgoCD and do not form part of the comparison.
+
+The empirical verification of this behaviour, documented in Figure~\ref{fig:escenario1-mutacion}, compares the content of the \texttt{Deployment} and a \texttt{Pod} in the cluster by searching for relevant fields:
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque5_escenario1Mutacion.png}
+\caption{Deployment vs. Pod comparison: mutations exist in the Pod but not in the \texttt{spec.template} of the Deployment}
+\label{fig:escenario1-mutacion}
+\end{figure}
+
+The search on \texttt{/tmp/deployment-cluster.yaml} returns \texttt{resources:} with empty value (the field exists in the object but without assigned values in the template) and \texttt{securityContext:} only with \texttt{runAsNonRoot:\,true} and \texttt{runAsUser:\,101}, which correspond to the values explicitly declared in the Git manifest. The search on \texttt{/tmp/pod-cluster.yaml} returns \texttt{resources:} with values injected by P4 (\texttt{limits} and \texttt{requests}), multiple \texttt{securityContext:} entries with values injected by P5 and P6, and the presence of the label \texttt{security.tfm/hardened-by:\,kyverno} injected by P7. The injected fields exist in the Pod but not in the Deployment, and ArgoCD only compares Deployments.
+
+This observation is related to the autogen mechanism described in Section~\ref{subsec:autogen}. The rules \texttt{autogen-add-resources}, \texttt{autogen-add-default-securitycontext} and similar, visible in Figure~\ref{fig:autogen-deployment}, generate additional rules that apply to the \texttt{spec.template.spec} of higher-level controllers, not only to the resulting Pods.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{actions/bloque5_escenario1Autogen.png}
+\caption{Autogen rules for policy P4: cover Deployment, StatefulSet, Job, ReplicaSet via \texttt{spec.template.spec}}
+\label{fig:autogen-deployment}
+\end{figure}
+
+However, empirical comparison demonstrates that the \texttt{spec.template} of the Deployment in the cluster does not contain the injected fields. This indicates that in the version of Kyverno used (v1.13) with \texttt{patchStrategicMerge}, the effective mutation occurs only on the \texttt{Pod} object at the time of its creation by the ReplicaSet, not on the \texttt{spec.template} of the Deployment at admission time. This behaviour is consistent with the principle of minimum interference with external declarative systems such as ArgoCD.
+
+\subsection{Verification of the case where drift does occur}
+
+To confirm that the described mechanism is correct and not simply an absence of mutation, an experimental policy ---\texttt{experimental-\allowbreak deployment-\allowbreak labels}--- is designed that explicitly mutates \texttt{Deployment} type resources by adding a label \texttt{experimental.tfm/\allowbreak deployment-mutated:\,\allowbreak "true"} directly to the \texttt{Deployment} object, as shown in Figure~\ref{fig:policy-experimental}.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\linewidth]{actions/bloque5_escenario2policy-experimental-deployment-labels.png}
+\caption{Experimental policy that directly mutates \texttt{Deployment} type resources}
+\label{fig:policy-experimental}
+\end{figure}
+\vspace{-\parskip}
+
+Figure~\ref{fig:escenario2-outsync} shows the result: immediately after applying this policy in the cluster, the \texttt{Application} \texttt{demo-app} transitions to \texttt{OutOfSync} state while \texttt{kyverno-policies} remains \texttt{Synced}. The \texttt{Deployment} in the cluster now has the additional label not declared in Git, and ArgoCD correctly detects the divergence.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{actions/bloque5_escenario2OutputdelComandoKubectl.png}
+\caption{Real drift case test: \texttt{demo-app} transitions to OutOfSync when directly mutating the Deployment}
+\label{fig:escenario2-outsync}
+\end{figure}
+
+This experiment simultaneously confirms two things: first, that ArgoCD's drift detection mechanism works correctly when mutation affects the level of the managed resource; second, that the main set's mutation policies (P4--P7) do not produce this effect because they operate at Pod level and not at Deployment level, which constitutes the correct design for their coexistence with GitOps systems.
+
+\subsection{Conclusion and resolution pattern}
+
+Empirical analysis allows formulating a precise technical conclusion: in the implemented setup, the friction between Kyverno's \textit{mutating webhooks} and ArgoCD does not manifest for the main set's mutation policies because these operate at a different hierarchical level than the resources managed by ArgoCD. The official documentation warning is correct in general, but not applicable to this specific design.
+
+In scenarios where policies directly mutated resources of the same type as those managed in Git ---for example, \texttt{spec.replicas} mutations in Deployments or addition of labels at the Deployment level--- it would be necessary to configure \texttt{ignoreDifferences} in the corresponding \texttt{Application} for the affected fields. The resolution pattern already documented in Section~\ref{sec:ignore-differences} ---use of \texttt{jqPathExpressions} to exclude fields modified by the system--- is directly applicable to this case, without requiring changes to the Git manifests or Kyverno policies.

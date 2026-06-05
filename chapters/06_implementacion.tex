@@ -1,112 +1,140 @@
-\chapter{Implementación}
+\chapter{Implementación del clúster y políticas de seguridad}
 
-El presente capítulo documenta la implementación práctica del entorno DevSecOps descrito en los capítulos anteriores. A diferencia del Capítulo~5, que establece el diseño y las decisiones arquitectónicas, este capítulo se centra en la ejecución concreta: los pasos realizados, las políticas desplegadas con sus manifiestos completos, las pruebas ejecutadas y los resultados observados. Cada sección incluye evidencia directa del sistema en funcionamiento mediante capturas del entorno real.
+El presente capítulo documenta la implementación práctica del clúster Kubernetes y del motor de políticas que constituyen el núcleo de seguridad del entorno diseñado en el Capítulo~5. A diferencia de aquel, que establece las decisiones arquitectónicas y su justificación teórica, este capítulo se centra en la ejecución concreta: los pasos realizados, las políticas desplegadas con sus manifiestos completos, las pruebas ejecutadas y los resultados observados. La implementación de los componentes de automatización del \textit{pipeline} DevSecOps —ArgoCD para el despliegue continuo y GitHub Actions para la integración continua— se aborda en los capítulos siguientes.
+
+El capítulo se estructura en siete secciones. La primera cubre el aprovisionamiento del clúster Kubernetes sobre el entorno de laboratorio. La segunda describe el despliegue de Kyverno y la verificación de su integración con el API Server. Las secciones tercera, cuarta y quinta documentan respectivamente la implementación de las políticas de validación, mutación y generación, con sus manifiestos, justificaciones técnicas y pruebas asociadas. La sexta sección recoge las consideraciones operativas y los hallazgos empíricos más relevantes del proceso, incluyendo la verificación del orden de ejecución de los \textit{webhooks} y la prueba integral de \textit{auto-hardening}. El capítulo se cierra con la séptima sección, dedicada a los Policy Reports como mecanismo nativo de auditoría de cumplimiento.
 
 % ─────────────────────────────────────────────
 \section{Aprovisionamiento del clúster Kubernetes}
 % ─────────────────────────────────────────────
 
-El punto de partida del proyecto es el aprovisionamiento de un clúster Kubernetes funcional sobre el entorno de laboratorio descrito en la Sección~4.2. Las máquinas virtuales, proporcionadas por el tutor, ejecutan Ubuntu Server 24.04 LTS y están preconfiguradas con los paquetes necesarios (\texttt{kubeadm}, \texttt{kubelet}, \texttt{kubectl}) y con la capa de red de VirtualBox en modo NAT más \textit{host-only adapter}.
+El punto de partida del proyecto es el aprovisionamiento de un clúster Kubernetes funcional sobre el entorno de laboratorio descrito en la Sección~4.2. Las máquinas virtuales, proporcionadas por el tutor, ejecutan Ubuntu Server 24.04~LTS y están preconfiguradas con los paquetes necesarios (\texttt{kubeadm}, \texttt{kubelet}, \texttt{kubectl}) y con la capa de red de VirtualBox en modo NAT más \textit{host-only adapter}.
 
-La inicialización del plano de control se realiza desde el nodo \texttt{control} (\texttt{192.168.1.101}) mediante el comando:
+La inicialización del plano de control se realiza desde el nodo \texttt{control} mediante el siguiente comando:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 sudo kubeadm init --apiserver-advertise-address=192.168.1.101
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-El parámetro \texttt{--apiserver-advertise-address} es necesario en entornos con múltiples interfaces de red para indicar a kubeadm en qué dirección debe escuchar el API Server. Sin este parámetro, kubeadm seleccionaría la interfaz por defecto, que en VirtualBox corresponde al adaptador NAT (\texttt{10.0.2.x}), inaccesible desde el nodo worker. Especificando la dirección de la interfaz \textit{host-only}, se garantiza que los componentes del clúster —incluidos los webhooks de Kyverno— son alcanzables a través de la red interna del laboratorio.
+El parámetro \texttt{-{}-apiserver-advertise-address} es necesario en entornos con múltiples interfaces de red para indicar a kubeadm en qué dirección debe escuchar el API Server. Sin este parámetro, kubeadm seleccionaría la interfaz por defecto, que en VirtualBox corresponde al adaptador NAT (\texttt{10.0.2.x}), inaccesible desde el nodo worker. Especificando la dirección de la interfaz \textit{host-only}, se garantiza que los componentes del clúster —incluidos los webhooks de Kyverno— son alcanzables a través de la red interna del laboratorio.
 
 Tras la inicialización, se configura el acceso a \texttt{kubectl} para el usuario \texttt{student} copiando el fichero de configuración generado por kubeadm:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
 A continuación, el nodo worker (\texttt{192.168.1.102}) se incorpora al clúster mediante el comando \texttt{kubeadm join} generado durante la inicialización, que incluye el token de arranque y el hash del certificado del API Server para garantizar la autenticidad de la conexión.
 
 Una vez que ambos nodos forman parte del clúster, se instala el plugin CNI Calico en su versión 3.28:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/
-calico/v3.28.0/manifests/calico.yaml
-\end{verbatim}
-\end{minipage}
-\end{center}
+\begin{lstlisting}
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+\end{lstlisting}
 
-Calico configura el espacio de direccionamiento de pods con el CIDR \texttt{172.16.0.0/16}, que es el valor por defecto asignado por esta distribución de Calico. Una vez completada la instalación y tras la convergencia de los componentes del sistema, el clúster alcanza el estado operativo con ambos nodos en estado \texttt{Ready}.
+Calico configura el espacio de direccionamiento de pods con el CIDR \texttt{172.16.0.0/16}, valor por defecto de esta distribución. Una vez completada la instalación y tras la convergencia de los componentes del sistema, el clúster alcanza el estado operativo con ambos nodos en estado \texttt{Ready}.
 
 % ─────────────────────────────────────────────
 \section{Despliegue e integración de Kyverno}
 % ─────────────────────────────────────────────
 
-Con el clúster operativo, el siguiente paso es la instalación de Kyverno como motor de políticas de seguridad. Kyverno se despliega mediante Helm en el namespace dedicado \texttt{kyverno}, con todos sus controladores en modo \textit{standalone}:
+Con el clúster operativo, el siguiente paso es la instalación de Kyverno como motor de políticas de seguridad. Kyverno se despliega mediante Helm en el namespace dedicado \texttt{kyverno}:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 helm repo add kyverno https://kyverno.github.io/kyverno/
 helm repo update
 helm install kyverno kyverno/kyverno -n kyverno --create-namespace
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
 Tras la instalación, la verificación del estado de los pods en el namespace \texttt{kyverno} confirma que los cuatro controladores están activos y en estado \texttt{Running}, como muestra la Figura~\ref{fig:kyverno-pods}.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.85\linewidth]{kyverno/compKyverno.png}
 \caption{Controladores de Kyverno desplegados en el clúster}
 \label{fig:kyverno-pods}
 \end{figure}
 
-Los cuatro controladores —\texttt{admission-controller}, \texttt{background-controller}, \texttt{cleanup-controller} y \texttt{reports-controller}— operan de forma independiente y complementaria, tal como se describió en la Sección~5.2.2. El controlador más relevante para el comportamiento en tiempo real del sistema es el \textit{admission controller}, que se registra en el API Server inmediatamente tras su despliegue.
+Los cuatro controladores —\texttt{admission-controller}, \texttt{background-controller}, \texttt{cleanup-\allowbreak controller} y \texttt{reports-controller}— operan de forma independiente y complementaria, tal como se describió en la Sección~5.2.2. El controlador más relevante para el comportamiento en tiempo real del sistema es el \textit{admission controller}, que se registra en el API Server inmediatamente tras su despliegue.
 
-La verificación de los webhooks registrados confirma que Kyverno ha establecido correctamente su integración con el API Server. La consulta de los objetos \texttt{ValidatingWebhookConfiguration} muestra siete configuraciones registradas por Kyverno, como se aprecia en la Figura~\ref{fig:kyverno-webhooks}.
+La verificación de los webhooks registrados confirma que Kyverno ha establecido correctamente su integración con el API Server. La consulta de los objetos \texttt{Validating\allowbreak{}WebhookConfiguration} muestra siete configuraciones registradas por Kyverno, como se aprecia en la Figura~\ref{fig:kyverno-webhooks}.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.85\linewidth]{kyverno/webhooksKyverno.png}
 \caption{ValidatingWebhookConfiguration registradas por Kyverno en el API Server}
 \label{fig:kyverno-webhooks}
 \end{figure}
 
-Entre las configuraciones registradas, la más relevante para este trabajo es \texttt{kyverno-resource-validating-webhook-cfg}, que intercepta las solicitudes de creación y modificación de recursos arbitrarios del clúster y las deriva al \textit{admission controller} de Kyverno para su evaluación. Las configuraciones adicionales cubren casos específicos como la validación de las propias políticas (\texttt{kyverno-policy-validating-webhook-cfg}), el contexto global (\texttt{kyverno-global-context-validating-webhook-cfg}) y la gestión de excepciones y TTL. Análogamente, Kyverno registra las correspondientes configuraciones \texttt{MutatingWebhookConfiguration} para el procesamiento de las políticas de tipo \textit{mutate}.
+Entre las configuraciones registradas, la más relevante para este trabajo es \texttt{kyverno-resource-\allowbreak{}validating-\allowbreak{}webhook-\allowbreak{}cfg}, que intercepta las solicitudes de creación y modificación de recursos arbitrarios del clúster y las deriva al \textit{admission controller} de Kyverno para su evaluación. Las configuraciones adicionales cubren casos específicos como la validación de las propias políticas (\texttt{kyverno-policy-\allowbreak{}validating-\allowbreak{}webhook-\allowbreak{}cfg}), el contexto global (\texttt{kyverno-global-context-\allowbreak{}validating-\allowbreak{}webhook-\allowbreak{}cfg}) y la gestión de excepciones y TTL. Análogamente, Kyverno registra las correspondientes \texttt{Mutating\allowbreak{}Webhook\allowbreak{}Configuration} para el procesamiento de las políticas de tipo \textit{mutate}.
 
 Con Kyverno instalado y sus webhooks activos, el clúster está listo para recibir políticas de seguridad. La Figura~\ref{fig:estado-inicial} muestra el estado del clúster en este punto, antes de aplicar ninguna política: la consulta de \texttt{ClusterPolicy} no devuelve ningún recurso.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
-\includegraphics[width=0.55\linewidth]{kyverno/estadoInicial.png}
+\includegraphics[width=0.58\linewidth]{kyverno/estadoInicial.png}
 \caption{Estado inicial del clúster: sin políticas desplegadas}
 \label{fig:estado-inicial}
 \end{figure}
 
 % ─────────────────────────────────────────────
+\subsection{El mecanismo de autogen de Kyverno}
+\label{subsec:autogen}
+% ─────────────────────────────────────────────
+
+Antes de documentar las políticas implementadas, es necesario entender un mecanismo que condiciona el alcance real de todas ellas: la generación automática de reglas, conocida como \textit{autogen}.
+
+\subsubsection*{El problema: los Pods rara vez se crean directamente}
+
+Las ocho políticas de este trabajo declaran \texttt{match.resources.kinds:\,[Pod]}, lo que parece restringir su aplicación a recursos de tipo \texttt{Pod}. Sin embargo, en la práctica los Pods no se crean directamente: son generados por controllers de nivel superior —\texttt{Deployment}, \texttt{StatefulSet}, \texttt{DaemonSet}, \texttt{Job}, \texttt{CronJob}, \texttt{ReplicaSet}— a través de un campo \texttt{spec.template} que contiene la especificación del Pod a instanciar.
+
+Si Kyverno únicamente evaluara los recursos de tipo \texttt{Pod}, un desarrollador —o un atacante— podría crear un \texttt{Deployment} con configuración insegura sin que la política lo interceptara. Los Pods derivados de ese Deployment serían rechazados individualmente por el \textit{admission webhook} cuando el controller intentara crearlos, pero el objeto \texttt{Deployment} quedaría persistido en etcd y el controller entraría en un bucle de errores recurrentes, generando ruido operativo y dejando el recurso raíz en un estado inconsistente. En modos de fallo permisivos, dependiendo de la configuración del \texttt{failurePolicy} del webhook, algunos recursos podrían incluso llegar a ejecutarse.
+
+\subsubsection*{La solución: reglas autogeneradas}
+
+Kyverno resuelve este problema de forma transparente para el autor de la política. Al procesar una \texttt{ClusterPolicy} que declara \texttt{match.kinds:\,[Pod]}, el motor analiza el patrón definido y genera automáticamente reglas adicionales —denominadas \textit{autogen rules}— que aplican el mismo control sobre los \texttt{spec.template.spec} de los controllers que crean Pods. El desarrollador define la política una sola vez y Kyverno la replica internamente para cubrir \texttt{Deployment}, \texttt{StatefulSet}, \texttt{DaemonSet}, \texttt{Job}, \texttt{CronJob} y \texttt{ReplicaSet}.
+
+La generación distingue dos casos según la profundidad de anidamiento. Para la mayoría de controllers, la regla autogenerada se denomina \texttt{autogen-<nombre-original>} y aplica el patrón sobre \texttt{spec.template.spec}. Para \texttt{CronJob}, cuya especificación de Pod está un nivel más profundo (\texttt{spec.jobTemplate.\allowbreak{}template.spec}), Kyverno genera una segunda regla adicional, \texttt{autogen-cronjob-<nombre-original>}, que ajusta el \textit{path} del patrón en consecuencia.
+
+La verificación empírica de este comportamiento se realiza inspeccionando el objeto \texttt{ClusterPolicy} una vez desplegado:
+
+\begin{lstlisting}
+kubectl get clusterpolicy disallow-root -o yaml | grep -A 50 "autogen:"
+\end{lstlisting}
+
+El \textit{output} de este comando muestra las reglas \texttt{autogen-require-run-as-non-root}, que cubre Deployments, StatefulSets, Jobs y CronJobs, y \texttt{autogen-cronjob-require-run-as-non-root}, que atiende el caso específico de \texttt{CronJob}. Estas reglas son generadas internamente por Kyverno y almacenadas en el objeto de la política en etcd; no requieren ninguna intervención manual del operador.
+
+\subsubsection*{Comportamiento diferenciado: validate vs. mutate}
+
+El mecanismo de autogen no se comporta de forma idéntica para todos los tipos de política:
+
+\begin{itemize}
+  \item Para políticas de tipo \textbf{validate}, autogen es siempre automático e incondicional. Kyverno genera las reglas adicionales para todos los controllers que crean Pods sin necesidad de ninguna configuración explícita.
+  \item Para políticas de tipo \textbf{mutate} que utilizan \texttt{patchStrategicMerge} —como las cuatro políticas de mutación de este trabajo (P4, P5, P6, P7)—, autogen también es automático. Kyverno adapta el parche para que se aplique sobre el campo \texttt{spec.template.spec} del controller, garantizando que las mutaciones inyectadas sobre Pods directos se replican igualmente sobre los Pods derivados de Deployments o StatefulSets.
+  \item Para políticas de tipo \textbf{mutate} que utilizan \texttt{patchesJson6902}, autogen no se aplica por defecto, ya que los \textit{paths} JSON absolutos de este mecanismo no son generalizables automáticamente. En estos casos, el operador debe configurar el comportamiento de autogen de forma explícita.
+\end{itemize}
+
+\subsubsection*{Implicación para las políticas de este trabajo}
+
+Las ocho políticas implementadas —P1 a P8— declaran \texttt{match.kinds:\,[Pod]}, pero gracias al mecanismo de autogen están cubriendo efectivamente Deployments, StatefulSets, Jobs y CronJobs. Esto significa que el alcance real del sistema de seguridad es significativamente mayor que el que se desprende de la lectura directa de los manifiestos.
+
+Este comportamiento se hizo evidente durante las fases iniciales de la implementación: los PolicyViolations generados por el Reports Controller incluían mensajes como \texttt{autogen-require-run-as-non-root} aplicándose sobre \texttt{Deployment} y \texttt{ReplicaSet} de los propios componentes de Kyverno y de \texttt{kube-system}, confirmando que la cobertura se extendía automáticamente a recursos de nivel superior sin haber declarado esos kinds en la política.
+
+Kyverno permite controlar este comportamiento mediante la anotación \texttt{pod-policies.kyverno.io/\allowbreak{}autogen-controllers} en la \texttt{metadata} de la política, que acepta una lista explícita de controllers a cubrir o el valor \texttt{none} para desactivar autogen completamente. En este trabajo se utiliza el comportamiento por defecto, que ofrece la cobertura más amplia posible sin configuración adicional.
+
+% ─────────────────────────────────────────────
 \section{Políticas de validación}
 % ─────────────────────────────────────────────
 
-Las políticas de validación constituyen la capa reactiva del sistema de seguridad: actúan rechazando recursos que incumplen condiciones que no pueden resolverse mediante mutación automática. Como se justificó en la Sección~5.5.4, las políticas de mutación tienen precedencia y actúan antes, por lo que las de validación operan como barrera final para configuraciones explícitamente inseguras que no deben corregirse de forma silenciosa, sino rechazarse con un mensaje claro.
+Las políticas de validación constituyen la capa reactiva del sistema de seguridad: actúan rechazando recursos que incumplen condiciones que no pueden resolverse mediante mutación automática. Como se justificó en la Sección~5.5.4, las políticas de mutación tienen precedencia y actúan antes; las de validación operan, por tanto, como barrera final para configuraciones explícitamente inseguras que no deben corregirse de forma silenciosa, sino rechazarse con un mensaje claro al solicitante.
 
 \subsection{Política P1: \texttt{disallow-root}}
 
-La primera política de validación impide el despliegue de pods que no especifiquen explícitamente que sus contenedores deben ejecutarse como un usuario no root. El manifiesto completo es el siguiente:
+La primera política de validación impide el despliegue de pods que no especifiquen explícitamente que sus contenedores deben ejecutarse como un usuario no root:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -127,19 +155,15 @@ spec:
         spec:
           securityContext:
             runAsNonRoot: true
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-La política opera mediante un mecanismo de \textit{pattern matching}: Kyverno verifica que el campo \texttt{spec.securityContext.runAsNonRoot} existe y tiene el valor \texttt{true}. Si el campo está ausente o es \texttt{false}, el webhook devuelve un error de validación con el mensaje definido y la solicitud es rechazada.
+La política opera mediante \textit{pattern matching}: Kyverno verifica que el campo \texttt{spec.security\allowbreak{}Context.\allowbreak{}runAsNonRoot} existe con el valor \texttt{true}. Si el campo está ausente o es \texttt{false}, el webhook devuelve un error de validación con el mensaje definido y la solicitud es rechazada.
 
-La justificación técnica de este control es doble. En primer lugar, un proceso que ejecuta como \texttt{UID 0} dentro del contenedor hereda el conjunto completo de capacidades del kernel de Linux asignado al contenedor, incluyendo \texttt{CAP\_SYS\_ADMIN}, \texttt{CAP\_NET_RAW} y otras que amplían significativamente la superficie de ataque. En segundo lugar, si se produce un escape del aislamiento del contenedor —ya sea mediante una vulnerabilidad del runtime o del kernel—, un proceso que ya ejecutaba como root en el contenedor obtendrá privilegios de root en el nodo anfitrión, comprometiendo la totalidad del nodo y potencialmente el clúster.
+La justificación técnica de este control es doble. Por un lado, un proceso con \texttt{UID~0} dentro del contenedor hereda el conjunto completo de Linux capabilities asignado al mismo, incluyendo \texttt{CAP\_SYS\_ADMIN} y \texttt{CAP\_NET\_RAW}, que amplían significativamente la superficie de ataque. Por otro, si se produce un escape del aislamiento del contenedor —mediante una vulnerabilidad del runtime o del kernel—, un proceso que ya ejecutaba como root en el contenedor obtendrá privilegios de root sobre el nodo anfitrión, comprometiendo potencialmente la totalidad del clúster.
 
-La prueba de validación se realiza aplicando el siguiente pod, que no especifica ningún \texttt{securityContext}:
+La prueba de validación aplica el siguiente pod, que no especifica ningún \texttt{securityContext}:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -148,13 +172,11 @@ spec:
   containers:
   - name: nginx
     image: nginx
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-El resultado, mostrado en la Figura~\ref{fig:test1}, confirma que el webhook de Kyverno rechaza la solicitud con el mensaje de error de la política, indicando el path exacto del campo que falla (\texttt{/spec/securityContext/runAsNonRoot/}).
+El resultado, mostrado en la Figura~\ref{fig:test1}, confirma que el webhook de Kyverno rechaza la solicitud indicando el path exacto del campo que falla.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/test1.png}
 \caption{P1: bloqueo de pod sin \texttt{runAsNonRoot} por el webhook de Kyverno}
@@ -163,11 +185,9 @@ El resultado, mostrado en la Figura~\ref{fig:test1}, confirma que el webhook de 
 
 \subsection{Política P2: \texttt{disallow-privilege-escalation}}
 
-La segunda política de validación exige que todos los contenedores declaren explícitamente \texttt{allowPrivilegeEscalation: false} en su \texttt{securityContext} a nivel de contenedor:
+La segunda política exige que todos los contenedores declaren explícitamente \texttt{allowPrivilege\allowbreak{}Escalation: false} en su \texttt{securityContext} a nivel de contenedor:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -188,30 +208,26 @@ spec:
           containers:
           - securityContext:
               allowPrivilegeEscalation: false
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-Este campo controla el flag \texttt{no\_new\_privs} del kernel Linux, introducido en la versión 3.5. Cuando está activo, impide que cualquier proceso hijo del contenedor adquiera más privilegios que su proceso padre, bloqueando de forma efectiva los ataques basados en la ejecución de binarios con el bit \texttt{SUID} o \texttt{SGID} activo. Sin este flag, un proceso que ejecuta con \texttt{UID} no privilegiado podría invocar un binario como \texttt{sudo} o \texttt{su} con bit SUID para elevar sus privilegios al de root, eludiendo los controles de \texttt{runAsNonRoot}.
+Este campo controla el flag \texttt{no\_new\_privs} del kernel Linux \cite{linux_no_new_privs}, que impide que cualquier proceso hijo adquiera más privilegios que su proceso padre. Sin este flag activo, un proceso con \texttt{UID} no privilegiado podría invocar un binario con el bit \texttt{SUID} activo —como \texttt{sudo}— para elevar sus privilegios a root, eludiendo los controles de \texttt{runAsNonRoot}.
 
-La prueba aplica un pod que solicita escalada de privilegios de forma explícita. El resultado, capturado en la Figura~\ref{fig:test2}, muestra el rechazo por el webhook con el path del campo infractor (\texttt{/spec/containers/0/securityContext/allowPrivilegeEscalation/}).
+La prueba aplica un pod que solicita escalada de privilegios de forma explícita. El resultado, en la Figura~\ref{fig:test2}, muestra el rechazo con el path del campo infractor.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/test2.png}
 \caption{P2: bloqueo de pod con \texttt{allowPrivilegeEscalation: true}}
 \label{fig:test2}
 \end{figure}
 
-Es importante destacar la interacción entre esta política y la política de mutación P5, descrita en la Sección~6.4.2. Dado que el flujo de admisión de Kubernetes invoca los \textit{mutating webhooks} antes que los \textit{validating webhooks}, la política P5 inyecta \texttt{allowPrivilegeEscalation: false} automáticamente en pods que no especifican este campo. En consecuencia, P2 actúa únicamente como barrera final para los casos en que el valor \texttt{true} ha sido declarado de forma explícita en el manifiesto —una declaración de intención insegura que no debe ser corregida silenciosamente, sino rechazada.
+Cabe destacar la interacción entre esta política y la política de mutación P5. Dado que los \textit{mutating webhooks} se invocan antes que los \textit{validating webhooks}, P5 inyecta \texttt{allow\-Privilege\-Escalation:\,false} automáticamente en pods que no especifican este campo. En consecuencia, P2 actúa únicamente como barrera final para los casos en que el valor \texttt{true} ha sido declarado de forma explícita —una declaración de intención insegura que no debe corregirse silenciosamente, sino rechazarse.
 
 \subsection{Política P3: \texttt{restrict-image-registries}}
 
-La tercera política de validación restringe los registros de imágenes de contenedor a un conjunto de fuentes verificadas. Se implementa mediante el mecanismo \texttt{foreach} de Kyverno, que permite evaluar condiciones sobre listas de elementos:
+La tercera política restringe los registros de imágenes a un conjunto de fuentes verificadas, implementada mediante el mecanismo \texttt{foreach} de Kyverno:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -228,9 +244,9 @@ spec:
           - Pod
     validate:
       message: >-
-        Solo se permiten imágenes de registros autorizados:
+        Solo se permiten imagenes de registros autorizados:
         docker.io, ghcr.io, registry.k8s.io, quay.io.
-        La imagen {{ element.image }} no está permitida.
+        La imagen {{ element.image }} no esta permitida.
       foreach:
       - list: "request.object.spec.containers"
         deny:
@@ -247,42 +263,38 @@ spec:
               - "alpine*"
               - "busybox*"
               - "nginxinc/*"
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-La política itera sobre todos los contenedores del pod y deniega la solicitud si alguna imagen no pertenece a los patrones de registro autorizados. Los patrones sin prefijo de registro (\texttt{nginx*}, \texttt{alpine*}, \texttt{busybox*}) son necesarios porque Kubernetes resuelve implícitamente las referencias de imagen sin prefijo hacia Docker Hub, y las pruebas del proyecto utilizan estas imágenes en su forma abreviada. La inclusión de \texttt{ghcr.io/*} es también un requisito operativo, dado que las propias imágenes de Kyverno y otros componentes del clúster se distribuyen a través de este registro.
+La política itera sobre todos los contenedores del pod y deniega la solicitud si alguna imagen no pertenece a los patrones autorizados. Los patrones sin prefijo de registro (\texttt{nginx*}, \texttt{alpine*}, \texttt{busybox*}) son necesarios porque Kubernetes resuelve implícitamente las referencias sin prefijo hacia Docker Hub. La inclusión de \texttt{ghcr.io/*} es un requisito operativo, dado que las imágenes de Kyverno y otros componentes del clúster se distribuyen a través de ese registro.
 
-Esta política constituye una primera línea de defensa frente a ataques a la cadena de suministro del tipo documentado por el grupo TeamPCP \cite{teampcp2026}: un atacante que consiguiera alojar una imagen maliciosa en un registro arbitrario no podría ejecutarla en el clúster sin modificar esta política. En entornos de producción maduros, este control se complementaría con verificación de firmas digitales mediante Cosign o Notary —una línea de trabajo futuro mencionada en la Sección~4.7.
+Esta política constituye una primera línea de defensa frente a ataques a la cadena de suministro del tipo documentado por el grupo TeamPCP \cite{teampcp2026}: un atacante que aloje una imagen maliciosa en un registro arbitrario no podrá ejecutarla en el clúster sin modificar esta política. En entornos de producción maduros, el control se complementaría con verificación de firmas digitales mediante Cosign o Notary, contemplada como trabajo futuro en la Sección~4.7.
 
-Durante la implementación de esta política se observó un comportamiento relevante del motor de Kyverno: la variable \texttt{\{\{ element.image \}\}} referenciada en el campo \texttt{message} de nivel superior de la regla no se expande durante la evaluación, dado que dicha variable solo tiene scope dentro del bloque \texttt{foreach}. Kyverno acepta la política como válida —el campo \texttt{READY} aparece como \texttt{True}—, pero en el momento del rechazo el mensaje de error muestra únicamente la parte estática de la cadena, omitiendo la referencia a la imagen específica que causó el bloqueo. Este comportamiento ilustra una característica del modelo de scoping de variables de Kyverno que debe tenerse en cuenta al diseñar mensajes de error informativos en políticas con \texttt{foreach}.
+Durante la implementación se observó un comportamiento relevante del motor: la variable \texttt{\{\{ element.image \}\}} referenciada en el campo \texttt{message} de nivel superior no se expande en tiempo de rechazo, dado que dicha variable solo tiene scope dentro del bloque \texttt{foreach}. Kyverno acepta la política como válida y el campo \texttt{READY} muestra \texttt{True}, pero en el momento del rechazo el mensaje de error muestra únicamente la parte estática, omitiendo el nombre de la imagen específica. Este comportamiento ilustra el modelo de scoping de variables de Kyverno y debe tenerse en cuenta al diseñar mensajes de error informativos en políticas con \texttt{foreach}.
 
-La prueba de validación aplica un pod que referencia una imagen de un registro no autorizado. El resultado, capturado en la Figura~\ref{fig:test3}, revela un comportamiento de defensa en profundidad: el pod es bloqueado simultáneamente por dos políticas independientes.
+La prueba de validación aplica un pod con una imagen de registro no autorizado. El resultado, en la Figura~\ref{fig:test3}, revela un comportamiento de defensa en profundidad: el pod es bloqueado simultáneamente por dos políticas independientes.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/test3.png}
 \caption{P3: bloqueo simultáneo por \texttt{disallow-root} y \texttt{restrict-image-registries}}
 \label{fig:test3}
 \end{figure}
 
-Este resultado evidencia que el sistema de políticas actúa de forma acumulativa: el mismo recurso puede violar múltiples políticas simultáneamente, y el mensaje de error devuelto enumera todas las infracciones detectadas. La imagen \texttt{evilregistry.io/backdoor:latest} es bloqueada tanto por no especificar \texttt{runAsNonRoot} (P1) como por provenir de un registro no autorizado (P3), dos vectores de riesgo independientes que el sistema detecta y reporta en una única respuesta.
+Este resultado evidencia que el sistema de políticas actúa de forma acumulativa: el mismo recurso puede violar múltiples políticas simultáneamente, y el mensaje de error devuelto enumera todas las infracciones detectadas. La imagen \texttt{evilregistry.io/backdoor:latest} es bloqueada tanto por no especificar \texttt{runAsNonRoot} (P1) como por provenir de un registro no autorizado (P3), dos vectores de riesgo independientes detectados en una única respuesta.
 
 % ─────────────────────────────────────────────
 \section{Políticas de mutación}
 % ─────────────────────────────────────────────
 
-Las políticas de mutación constituyen el mecanismo principal de seguridad del sistema, alineándose con la hipótesis central del trabajo: que la corrección automática de configuraciones inseguras en tiempo de admisión ofrece mayor resiliencia y mejor experiencia de desarrollo que el mero rechazo. En lugar de bloquear pods con configuraciones incompletas, Kyverno los enriquece automáticamente con el perfil de seguridad correcto, haciendo que el \textit{hardening} sea transparente para el desarrollador.
+Las políticas de mutación constituyen el mecanismo principal de seguridad del sistema, alineándose con la hipótesis central del trabajo: que la corrección automática de configuraciones inseguras en tiempo de admisión ofrece mayor resiliencia y mejor experiencia de desarrollo que el mero rechazo. En lugar de bloquear pods con configuraciones incompletas, Kyverno los enriquece automáticamente con el perfil de seguridad correcto, haciendo el \textit{hardening} transparente para el desarrollador.
 
-El mecanismo de \texttt{patchStrategicMerge}, utilizado por las cuatro políticas de este bloque, realiza un merge inteligente del objeto original con el parche definido en la política: añade los campos ausentes y respeta los valores ya declarados explícitamente por el desarrollador. Esto garantiza que las mutaciones son aditivas y no sobreescriben configuraciones legítimamente definidas.
+El mecanismo \texttt{patchStrategicMerge}, utilizado por las cuatro políticas de este bloque, realiza un merge inteligente del objeto original con el parche definido: añade los campos ausentes y respeta los valores ya declarados explícitamente por el desarrollador, garantizando que las mutaciones son aditivas y no destructivas.
 
 \subsection{Política P4: \texttt{add-default-resources}}
 
-La cuarta política inyecta automáticamente \textit{requests} y \textit{limits} de CPU y memoria en todos los contenedores que no los declaren:
+La cuarta política inyecta automáticamente \texttt{requests} y \texttt{limits} de CPU y memoria en todos los contenedores que no los declaren:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -307,30 +319,26 @@ spec:
               limits:
                 cpu: "500m"
                 memory: "256Mi"
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-La inyección simultánea de \texttt{requests} y \texttt{limits} con los mismos valores —en lugar de únicamente \texttt{limits}— responde a una decisión de diseño técnicamente justificada. Kubernetes clasifica los pods en tres clases de calidad de servicio (QoS): \texttt{Guaranteed} (cuando \texttt{requests == limits} para todos los contenedores), \texttt{Burstable} (cuando se definen solo \texttt{requests} o los valores difieren) y \texttt{BestEffort} (cuando no hay ninguno). Un pod con QoS \texttt{Guaranteed} es el último candidato a evicción cuando el nodo sufre presión de recursos, garantizando mayor estabilidad. Adicionalmente, sin \texttt{requests} definidos, el Scheduler de Kubernetes no dispone de información para la toma de decisiones de \textit{bin-packing} y puede programar pods en nodos sin capacidad suficiente, resultando en fallos de OOM (\textit{Out of Memory}) en tiempo de ejecución.
+La inyección simultánea de \texttt{requests} y \texttt{limits} con los mismos valores —en lugar de únicamente \texttt{limits}— responde a una decisión técnicamente justificada. Kubernetes clasifica los pods en tres clases de calidad de servicio (\textit{QoS}) \cite{kubernetes_qos}: \texttt{Guaranteed} (cuando \texttt{requests\,==\,limits} para todos los contenedores), \texttt{Burstable} y \texttt{BestEffort}. Un pod con QoS \texttt{Guaranteed} es el último candidato a evicción cuando el nodo sufre presión de recursos. Adicionalmente, sin \texttt{requests} definidos, el Scheduler no dispone de información para las decisiones de \textit{bin-packing} y puede programar pods en nodos sin capacidad suficiente, resultando en fallos de OOM en tiempo de ejecución.
 
 La prueba despliega un pod sin ningún campo \texttt{resources} definido. Como muestra la Figura~\ref{fig:test4}, Kyverno inyecta los valores de \texttt{requests} y \texttt{limits} automáticamente, visibles en la salida de \texttt{kubectl get pod -o yaml}.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/test4.png}
 \caption{P4: inyección automática de \texttt{resources.requests} y \texttt{resources.limits}}
 \label{fig:test4}
 \end{figure}
 
-Resulta especialmente significativo que la salida muestre también los labels \texttt{security.tfm/hardened-by: kyverno} y \texttt{security.tfm/policy-version: v1.0}, evidencia de que P7 (descrita en la Sección~6.4.4) también ha actuado sobre el mismo recurso en el mismo ciclo de admisión. Esto demuestra que las múltiples políticas de mutación se aplican de forma coordinada sobre cada objeto en un único paso de admisión.
+Resulta especialmente significativo que la salida muestre también los labels \texttt{security.tfm/\allowbreak{}hardened-by:\,kyverno} y \texttt{security.tfm/\allowbreak{}policy-version:\,v1.0}, evidencia de que P7 también ha actuado sobre el mismo recurso en el mismo ciclo de admisión. Esto confirma que las múltiples políticas de mutación se aplican de forma coordinada sobre cada objeto en un único paso de admisión.
 
 \subsection{Política P5: \texttt{add-default-securitycontext}}
 
-La quinta política inyecta un \texttt{securityContext} seguro en todos los contenedores que no lo especifiquen:
+La quinta política inyecta un \texttt{securityContext} seguro en todos los contenedores que no lo especifiquen a nivel de contenedor:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -353,19 +361,17 @@ spec:
               capabilities:
                 drop:
                 - ALL
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-Esta política implementa dos controles de \textit{hardening} críticos de forma automática. El primero, \texttt{allowPrivilegeEscalation: false}, activa el flag \texttt{no\_new\_privs} del kernel, impidiendo la escalada de privilegios a través de binarios SUID, tal como se explicó en la Sección~6.3.2. Aquí la política actúa de forma \textit{proactiva} —inyectando la configuración segura antes de que llegue a la validación— en contraste con P2, que actúa de forma \textit{reactiva} rechazando la declaración explícita del valor inseguro.
+Esta política implementa dos controles de \textit{hardening} críticos de forma automática. El primero, \texttt{allow\-Privilege\-Escalation:\,false}, activa el flag \texttt{no\_new\_privs} del kernel, impidiendo la escalada de privilegios a través de binarios SUID. Aquí la política actúa de forma \textit{proactiva} —inyectando la configuración segura antes de que llegue a la validación— en contraste con P2, que actúa de forma \textit{reactiva} rechazando la declaración explícita del valor inseguro.
 
-El segundo control, \texttt{capabilities.drop: ALL}, elimina el conjunto completo de Linux capabilities heredadas por defecto por los contenedores en Kubernetes. Por defecto, y sin configuración adicional, un contenedor hereda un subconjunto de capabilities que incluye \texttt{NET\_RAW} (permite construir paquetes raw, facilitando ataques de red como spoofing), \texttt{MKNOD} (permite crear dispositivos de bloque), \texttt{CHOWN} (permite cambiar la propiedad de ficheros), entre otras. Estas capabilities son raramente necesarias para el funcionamiento de una aplicación típica y amplían innecesariamente la superficie de ataque. Al eliminarlas todas por defecto, se fuerza a los desarrolladores a declarar explícitamente las capabilities que sus aplicaciones realmente necesitan.
+El segundo control, \texttt{capabilities.drop:\,ALL}, elimina el conjunto completo de Linux capabilities heredadas por defecto. Sin configuración adicional, un contenedor hereda capabilities como \texttt{NET\_RAW} (construcción de paquetes raw), \texttt{MKNOD} (creación de dispositivos de bloque) o \texttt{CHOWN} (cambio de propietario de ficheros), que amplían innecesariamente la superficie de ataque. Al eliminarlas todas por defecto, se fuerza a los desarrolladores a declarar explícitamente las capabilities que sus aplicaciones realmente necesitan.
 
-Esta política es el ejemplo más representativo del concepto de \textit{auto-hardening}: el desarrollador puede desplegar un pod con configuración mínima sin conocimiento profundo de los campos de seguridad de Kubernetes, y la plataforma garantiza que el pod resultante cumple con un perfil de seguridad sólido.
+Esta política es el ejemplo más representativo del concepto de \textit{auto-hardening}: el desarrollador puede desplegar un pod con configuración mínima sin conocimiento profundo de los campos de seguridad de Kubernetes, y la plataforma garantiza un perfil de seguridad sólido de forma completamente transparente.
 
-La prueba despliega un pod con un \texttt{securityContext} definido solo a nivel de pod (no a nivel de contenedor). La Figura~\ref{fig:test5} muestra el resultado de la inspección del pod creado: el \texttt{securityContext} a nivel de contenedor contiene \texttt{allowPrivilegeEscalation: false}, \texttt{capabilities.drop: [ALL]} y también \texttt{readOnlyRootFilesystem: true} —inyectado por P6 en el mismo ciclo de admisión.
+La prueba despliega un pod con \texttt{securityContext} definido solo a nivel de pod. La Figura~\ref{fig:test5} muestra el resultado: el \texttt{securityContext} a nivel de contenedor contiene \texttt{allow\-Privilege\-Escalation:\,false}, \texttt{capabilities.drop:\,[ALL]} y \texttt{readOnly\-Root\-Filesystem:\,true} —inyectado este último por P6 en el mismo ciclo de admisión.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/test5.png}
 \caption{P5: inyección automática de \texttt{allowPrivilegeEscalation} y \texttt{capabilities.drop}}
@@ -376,9 +382,7 @@ La prueba despliega un pod con un \texttt{securityContext} definido solo a nivel
 
 La sexta política fuerza el sistema de ficheros raíz de todos los contenedores a modo de solo lectura:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -398,25 +402,19 @@ spec:
           - (name): "*"
             securityContext:
               readOnlyRootFilesystem: true
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-La justificación técnica de este control radica en el comportamiento habitual de los atacantes tras comprometer un contenedor: la mayoría de las técnicas de post-explotación —descarga de reverse shells, instalación de criptominers, ejecución de herramientas de reconocimiento— requieren escribir ficheros en el sistema de ficheros del contenedor. Un filesystem raíz de solo lectura hace que todos estos intentos fallen inmediatamente, conteniendo el radio de impacto de la intrusión.
+La mayoría de las técnicas de post-explotación tras comprometer un contenedor —descarga de reverse shells, instalación de criptominers, ejecución de herramientas de reconocimiento— requieren escribir ficheros en el sistema de ficheros del contenedor. Un filesystem raíz de solo lectura hace que estos intentos fallen inmediatamente, conteniendo el radio de impacto de la intrusión.
 
-La prueba verifica este efecto en dos pasos, ambos mostrados en la Figura~\ref{fig:test6}. Primero, se comprueba mediante la salida de \texttt{kubectl get pod -o yaml} que el campo \texttt{readOnlyRootFilesystem: true} ha sido inyectado. Segundo —y más significativo—, se ejecuta un comando dentro del contenedor que intenta crear un fichero en el directorio raíz:
+La prueba verifica este efecto en dos pasos, mostrados en la Figura~\ref{fig:test6}. Primero, la salida de \texttt{kubectl get pod -o yaml} confirma que el campo \texttt{readOnly\-Root\-Filesystem:\,true} ha sido inyectado. Segundo, se ejecuta un comando dentro del contenedor que intenta crear un fichero en el directorio raíz:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 kubectl exec test-mutate-seccontext -- touch /test-file
 touch: /test-file: Read-only file system
 command terminated with exit code 1
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.90\linewidth]{kyverno/test6.png}
 \caption{P6: verificación del filesystem de solo lectura en tiempo de ejecución}
@@ -425,15 +423,13 @@ command terminated with exit code 1
 
 Este resultado es especialmente valioso: demuestra que la mutación aplicada por Kyverno en tiempo de admisión tiene un efecto real y verificable sobre el comportamiento del contenedor en tiempo de ejecución, no solo sobre el manifiesto almacenado en etcd.
 
-Una limitación operativa conocida de esta política es que ciertas aplicaciones requieren escritura en directorios como \texttt{/tmp}, \texttt{/var/cache} o \texttt{/var/log}. La solución correcta —y la que se aplica en el propio pod integral de la Sección~6.6.2— consiste en montar un volumen de tipo \texttt{emptyDir} en los paths específicos que requieren escritura. Esta práctica no representa un debilitamiento de la política, sino una buena práctica de diseño que hace explícitas las necesidades de escritura de cada aplicación.
+Una limitación operativa conocida es que ciertas aplicaciones requieren escritura en directorios como \texttt{/tmp} o \texttt{/var/cache}. La solución correcta —aplicada en la prueba integral de la Sección~6.6.2— consiste en montar un volumen de tipo \texttt{emptyDir} en los paths específicos que requieren escritura. Esta práctica no debilita la política, sino que obliga a los desarrolladores a ser explícitos sobre sus necesidades de escritura, lo cual es en sí misma una buena práctica de diseño de contenedores.
 
 \subsection{Política P7: \texttt{add-default-labels}}
 
 La séptima política inyecta etiquetas de trazabilidad en todos los pods procesados por el sistema:
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -452,15 +448,13 @@ spec:
           labels:
             security.tfm/hardened-by: kyverno
             security.tfm/policy-version: "v1.0"
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-Aunque menos obvia que las políticas de seguridad directa, esta política implementa una capacidad de observabilidad y trazabilidad relevante en entornos productivos. Los labels inyectados permiten identificar en todo momento qué pods han sido procesados por el sistema de políticas y con qué versión, facilitando la auditoría de cobertura y la detección de pods que pudieran haber evadido el proceso de admisión (por ejemplo, pods pre-existentes antes del despliegue de Kyverno). El campo \texttt{security.tfm/policy-version} actúa como un marcador de versión que permite correlacionar el perfil de seguridad aplicado con la versión de políticas vigente en el momento del despliegue.
+Aunque menos obvia que las políticas de seguridad directa, esta política implementa una capacidad de observabilidad relevante en entornos productivos. Los labels inyectados permiten identificar en todo momento qué pods han sido procesados por el sistema y con qué versión de políticas, facilitando la auditoría de cobertura. El campo \texttt{security.tfm/\allowbreak{}policy-version} actúa como marcador que permite correlacionar el perfil de seguridad aplicado con la versión de políticas vigente en el momento del despliegue.
 
 La verificación mediante \texttt{kubectl get pods --show-labels}, mostrada en la Figura~\ref{fig:test7}, confirma que los labels están presentes en todos los pods activos en el namespace \texttt{default}.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.90\linewidth]{kyverno/test7.png}
 \caption{P7: labels de trazabilidad inyectados automáticamente en los pods}
@@ -473,11 +467,9 @@ La verificación mediante \texttt{kubectl get pods --show-labels}, mostrada en l
 
 \subsection{Política P8: \texttt{generate-networkpolicy-metadata}}
 
-La octava política demuestra el tercer tipo de acción disponible en Kyverno —\textit{generate}— y no tiene equivalente funcional en OPA Gatekeeper. A diferencia de las políticas anteriores, que actúan sobre recursos que ya están siendo creados, esta política reacciona ante la creación de un recurso de tipo \texttt{Namespace} y genera automáticamente un recurso derivado: una NetworkPolicy que bloquea el acceso al servicio de metadatos de instancia cloud (IMDS):
+La octava política demuestra el tercer tipo de acción disponible en Kyverno —\textit{generate}— sin equivalente funcional en OPA Gatekeeper. A diferencia de las políticas anteriores, que actúan sobre recursos en proceso de creación, esta reacciona ante la creación de un \texttt{Namespace} y genera automáticamente un recurso derivado: una NetworkPolicy que bloquea el acceso al servicio de metadatos de instancia cloud (IMDS):
 
-\begin{center}
-\begin{minipage}{0.88\linewidth}
-\begin{verbatim}
+\begin{lstlisting}
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -507,43 +499,43 @@ spec:
                 cidr: 0.0.0.0/0
                 except:
                 - 169.254.169.254/32
-\end{verbatim}
-\end{minipage}
-\end{center}
+\end{lstlisting}
 
-La NetworkPolicy generada permite todo el tráfico de salida (\texttt{cidr: 0.0.0.0/0}) excepto hacia la dirección \texttt{169.254.169.254/32}. Esta IP corresponde al IMDS presente en los principales proveedores cloud (AWS, GCP, Azure) y accesible desde cualquier instancia sin autenticación previa a través de HTTP. Un atacante que comprometa un pod en un entorno cloud puede realizar una solicitud a \texttt{http://169.254.169.254/latest/meta-data/} para obtener credenciales IAM temporales, tokens de servicio y configuración de red de la instancia subyacente, permitiendo la escalada desde el pod hasta la cuenta cloud. Este vector fue utilizado de forma documentada en el incidente de Capital One en 2019, donde un atacante aprovechó una vulnerabilidad SSRF para acceder al IMDS y obtener credenciales con las que exfiltrar datos de S3 \cite{capitalone2019}.
+La NetworkPolicy generada permite todo el tráfico de salida (\texttt{cidr:\,0.0.0.0/0}) excepto hacia la dirección \texttt{169.254.169.254/32}. Esta IP corresponde al IMDS presente en los principales proveedores cloud (AWS, GCP, Azure), accesible desde cualquier instancia sin autenticación previa. Un atacante que comprometa un pod puede realizar una solicitud a dicho endpoint para obtener credenciales IAM temporales, tokens de servicio y configuración de red de la instancia subyacente, lo que le permite escalar desde el pod hasta la cuenta cloud. Este vector fue utilizado de forma documentada en el incidente de Capital One en 2019, donde se explotó SSRF para acceder al IMDS y exfiltrar datos sensibles \cite{capitalone2019}.
 
-El campo \texttt{synchronize: true} activa el mecanismo de \textit{drift protection} del Background Controller de Kyverno: si la NetworkPolicy generada es modificada o eliminada, Kyverno la restaura automáticamente a su estado original.
+El campo \texttt{synchronize:\,true} activa el mecanismo de \textit{drift protection} del Background Controller: si la NetworkPolicy generada es modificada o eliminada, Kyverno la restaura automáticamente.
 
-La primera prueba, mostrada en la Figura~\ref{fig:test8}, demuestra la generación automática: se crea el namespace \texttt{test-networkpolicy} y, 9 segundos después, la NetworkPolicy \texttt{block-cloud-metadata} existe en dicho namespace sin que haya sido aplicada manualmente. La descripción detallada del recurso generado confirma que Kyverno ha añadido los labels de trazabilidad (\texttt{app.kubernetes.io/managed-by=kyverno}, \texttt{generate.kyverno.io/policy-name=generate-networkpolicy-metadata}) y que la regla de egress bloquea exclusivamente la IP \texttt{169.254.169.254/32}.
+La primera prueba, mostrada en la Figura~\ref{fig:test8}, demuestra la generación automática: se crea el namespace \texttt{test-networkpolicy} y tan solo 9~segundos después la NetworkPolicy \texttt{block-cloud-metadata} existe en dicho namespace sin haber sido aplicada manualmente. La descripción detallada del recurso generado confirma que Kyverno ha añadido los labels de trazabilidad correspondientes y que la regla de egress bloquea exclusivamente la IP \texttt{169.254.169.254/32}.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/test8.png}
 \caption{P8: NetworkPolicy generada automáticamente al crear el namespace}
 \label{fig:test8}
 \end{figure}
 
-La segunda prueba, mostrada en la Figura~\ref{fig:test9}, demuestra el mecanismo de \textit{drift protection}: la NetworkPolicy es eliminada manualmente mediante \texttt{kubectl delete}, y 57 segundos después ha sido regenerada automáticamente por el Background Controller de Kyverno, sin intervención humana.
+La segunda prueba, mostrada en la Figura~\ref{fig:test9}, demuestra el mecanismo de \textit{drift protection}: la NetworkPolicy es eliminada manualmente mediante \texttt{kubectl delete} y, 57~segundos después, ha sido regenerada automáticamente por el Background Controller, sin ninguna intervención humana.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.90\linewidth]{kyverno/test9.png}
-\caption{P8: drift protection — NetworkPolicy regenerada 57 segundos tras su eliminación manual}
+\caption{P8: \textit{drift protection} — NetworkPolicy regenerada 57~s tras su eliminación manual}
 \label{fig:test9}
 \end{figure}
 
-Este comportamiento ilustra una diferencia fundamental respecto a OPA Gatekeeper, que carece de soporte nativo para la generación de recursos y por tanto no puede implementar este patrón de protección continua.
+Este comportamiento ilustra una diferencia fundamental respecto a OPA Gatekeeper, que carece de soporte nativo para la generación de recursos y no puede implementar este patrón de protección continua.
 
 % ─────────────────────────────────────────────
 \section{Consideraciones operativas y lecciones aprendidas}
 % ─────────────────────────────────────────────
 
+Esta sección recoge los hallazgos operativos más relevantes surgidos durante la implementación que no encajan en la documentación individual de cada política. Algunos de ellos están directamente relacionados con el mecanismo de autogen descrito en la Sección~\ref{subsec:autogen}: la extensión automática de las políticas a Deployments y ReplicaSets generó fricción con ArgoCD durante las fases de integración del \textit{pipeline} GitOps, ya que las políticas evaluaban los recursos gestionados por el controlador de ArgoCD antes de que estos fueran completamente conformes. Este comportamiento se documenta en detalle en el Capítulo~7, en el contexto de la integración del \textit{pipeline} completo.
+
 \subsection{Exclusión de namespaces de infraestructura}
 
-Durante las fases iniciales de la implementación, las políticas de validación generaban infracciones sobre los propios componentes del clúster. En particular, la política P1 (\texttt{disallow-root}) marcaba como no conformes ciertos pods del namespace \texttt{kube-system} que ejecutan como root por requisito de su función. Paralelamente, la primera versión de la política P3 (\texttt{restrict-image-registries}) no incluía el patrón \texttt{ghcr.io/*} en la lista de registros permitidos, lo que generaba PolicyViolations sobre los propios controladores de Kyverno, cuyas imágenes se distribuyen a través de \texttt{ghcr.io/kyverno/}.
+Durante las fases iniciales de la implementación, las políticas de validación generaban infracciones sobre los propios componentes del clúster. En particular, la política P1 (\texttt{disallow-root}) marcaba como no conformes ciertos pods del namespace \texttt{kube-system} que ejecutan como root por requisito de su función. Paralelamente, la primera versión de P3 (\texttt{restrict-image-\allowbreak{}registries}) no incluía el patrón \texttt{ghcr.io/*}, lo que generaba PolicyViolations sobre los propios controladores de Kyverno, cuyas imágenes se distribuyen a través de \texttt{ghcr.io/kyverno/}.
 
-La solución aplicada fue doble. Por un lado, se añadió \texttt{ghcr.io/*} a la lista de registros autorizados en P3, corrigiendo el problema de forma estructural. Por otro, el uso de \texttt{ClusterPolicy} con scope irrestricto se revisó para excluir los namespaces de infraestructura (\texttt{kyverno}, \texttt{kube-system}) en aquellas políticas donde su aplicación no es pertinente. Esta es una práctica estándar en despliegues productivos de Kyverno, donde las políticas de seguridad deben diseñarse con consciencia de los componentes del sistema que las ejecutan. La Figura~\ref{fig:rules-aplicadas} muestra el estado final del clúster con las ocho políticas en estado \texttt{Ready}.
+La solución aplicada fue doble: se añadió \texttt{ghcr.io/*} a la lista de registros autorizados en P3, corrigiendo el problema de forma estructural; y se revisaron las políticas para excluir los namespaces de infraestructura en los casos donde su aplicación no es pertinente. Esta es una práctica estándar en despliegues productivos de Kyverno, donde las políticas de seguridad deben diseñarse con consciencia de los componentes del sistema que las ejecutan. La Figura~\ref{fig:rules-aplicadas} muestra el estado final del clúster con las ocho políticas en estado \texttt{Ready}.
 
 \begin{figure}[H]
 \centering
@@ -554,7 +546,7 @@ La solución aplicada fue doble. Por un lado, se añadió \texttt{ghcr.io/*} a l
 
 \subsection{Prueba integral de auto-hardening}
 
-La prueba más representativa del trabajo consiste en desplegar un pod con una configuración deliberadamente mínima y verificar que el conjunto completo de políticas de mutación lo transforma automáticamente en un pod con perfil de seguridad completo. El manifiesto inicial del pod, mostrado en la Figura~\ref{fig:pod-seguro-yaml}, contiene únicamente los campos estrictamente necesarios para que funcione: imagen, usuario de ejecución y un volumen \texttt{emptyDir} montado en \texttt{/tmp} para satisfacer la política P6 de filesystem de solo lectura.
+La prueba más representativa del trabajo consiste en desplegar un pod con configuración deliberadamente mínima y verificar que el conjunto completo de políticas de mutación lo transforma en un pod con perfil de seguridad completo. El manifiesto inicial, mostrado en la Figura~\ref{fig:pod-seguro-yaml}, contiene únicamente los campos estrictamente necesarios para el funcionamiento: imagen, usuario de ejecución y un volumen \texttt{emptyDir} montado en \texttt{/tmp} para satisfacer la política P6 de filesystem de solo lectura.
 
 \begin{figure}[H]
 \centering
@@ -563,14 +555,18 @@ La prueba más representativa del trabajo consiste en desplegar un pod con una c
 \label{fig:pod-seguro-yaml}
 \end{figure}
 
-Tras el despliegue, la inspección del pod mediante \texttt{kubectl get pod pod-seguro-completo -o yaml} devuelve el objeto completo tal como ha sido persistido en etcd después del paso por los webhooks de Kyverno. Las Figuras~\ref{fig:test10-1} y~\ref{fig:test10-2} muestran el resultado en su totalidad.
+\vspace{-\parskip}
+
+Tras el despliegue, la inspección del pod mediante \texttt{kubectl get pod pod-seguro-completo -o yaml} devuelve el objeto completo tal como ha sido persistido en etcd después del paso por los webhooks de Kyverno. Las Figuras~\ref{fig:test10-1} y~\ref{fig:test10-2} muestran el resultado.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/test10-1.png}
-\caption{Prueba integral (parte 1): metadata y spec inicial del pod tras la admisión}
+\caption{Prueba integral (parte 1): metadata y recursos del pod tras la admisión}
 \label{fig:test10-1}
 \end{figure}
+
+\vspace{-\parskip}
 
 \begin{figure}[H]
 \centering
@@ -579,51 +575,41 @@ Tras el despliegue, la inspección del pod mediante \texttt{kubectl get pod pod-
 \label{fig:test10-2}
 \end{figure}
 
-El análisis del objeto persistido confirma la presencia de todos los campos inyectados por las cuatro políticas de mutación activas:
 
-\begin{itemize}
-    \item \textbf{P4 — resources:} \texttt{limits} (cpu: 500m, memory: 256Mi) y \texttt{requests} (cpu: 100m, memory: 128Mi) inyectados automáticamente.
-    \item \textbf{P5 — securityContext:} \texttt{allowPrivilegeEscalation: false} y \texttt{capabilities.drop: [ALL]} inyectados en el contenedor.
-    \item \textbf{P6 — readOnlyRootFilesystem:} \texttt{readOnlyRootFilesystem: true} inyectado. El volumen \texttt{emptyDir} montado en \texttt{/tmp} permite la escritura en ese path específico sin comprometer el aislamiento del filesystem.
-    \item \textbf{P7 — labels:} \texttt{security.tfm/hardened-by: kyverno} y \texttt{security.tfm/policy-version: v1.0} presentes en los metadata del pod.
-\end{itemize}
+El análisis del objeto persistido confirma la presencia de todos los campos inyectados por las cuatro políticas de mutación activas: \texttt{resources.requests} y \texttt{resources.limits} (P4); \texttt{allow\-Privilege\-Escalation:\,false} y \texttt{capabilities.drop:\,[ALL]} (P5); \texttt{readOnly\-Root\-Filesystem:\,true} (P6); y los labels \texttt{security.tfm/\allowbreak{}hardened-by:\,kyverno} y \texttt{security.tfm/\allowbreak{}policy-version:\,v1.0} (P7). Las anotaciones de Calico confirman además que el pod ha sido asignado la IP \texttt{172.16.171.112} en el CIDR \texttt{172.16.0.0/16} y programado en el nodo \texttt{worker}.
 
-Adicionalmente, las anotaciones de Calico confirman que el pod ha sido asignado la IP \texttt{172.16.171.112} dentro del espacio de direccionamiento \texttt{172.16.0.0/16}, y que ha sido programado en el nodo \texttt{worker} (\texttt{nodeName: worker}), tal como corresponde a la arquitectura de dos nodos del laboratorio.
-
-Esta prueba constituye la evidencia empírica directa de la tesis central del trabajo: un desarrollador puede definir un pod con los campos mínimos necesarios para su función y obtener, de forma completamente transparente y sin conocimiento de los detalles de seguridad de Kubernetes, un pod correctamente securizado que cumple con el perfil de seguridad definido por la organización.
+Esta prueba constituye la evidencia empírica directa de la tesis central del trabajo: un desarrollador puede definir un pod con los campos mínimos necesarios para su función y obtener, de forma completamente transparente, un pod correctamente securizado que cumple con el perfil de seguridad definido por la organización.
 
 \subsection{El orden mutación-validación verificado empíricamente}
 
-Durante las pruebas se observó un comportamiento que ilustra empíricamente el orden de ejecución de los webhooks descrito teóricamente en la Sección~5.3.2. En una sesión de prueba, se intentó desplegar un pod con \texttt{allowPrivilegeEscalation: true} declarado de forma explícita mientras P5 y P2 estaban activas simultáneamente. El pod fue creado con éxito, pese a que P2 declara en modo \texttt{Enforce} que \texttt{allowPrivilegeEscalation: false} es obligatorio.
+Durante las pruebas se observó un comportamiento que ilustra de forma empírica el orden de ejecución de los webhooks descrito teóricamente en la Sección~5.3.2. Al intentar desplegar un pod con \texttt{allow\-Privilege\-Escalation:\,true} declarado de forma explícita mientras P5 y P2 estaban activas simultáneamente, el pod fue creado con éxito pese a que P2 opera en modo \texttt{Enforce}.
 
-La causa es precisa: P5 (mutating webhook) se ejecutó antes que P2 (validating webhook) y sobreescribió el valor \texttt{true} declarado en el manifiesto por \texttt{false}, de modo que cuando P2 evaluó el recurso, ya contenía el valor conforme. El \texttt{patchStrategicMerge} de P5 sobreescribe el campo incluso cuando el desarrollador lo ha declarado explícitamente con un valor inseguro.
+La causa es precisa: P5 (\textit{mutating webhook}) se ejecutó antes que P2 (\textit{validating webhook}) y sobreescribió el valor \texttt{true} declarado en el manifiesto por \texttt{false}, de modo que cuando P2 evaluó el recurso, ya contenía el valor conforme. El \texttt{patch\-Strategic\-Merge} de P5 sobreescribe el campo incluso cuando el desarrollador lo ha declarado explícitamente con un valor inseguro.
 
-Este comportamiento fue verificado deshabilitando temporalmente P5 y aplicando el mismo pod: en ausencia de la mutación, P2 rechazó correctamente la solicitud con el mensaje \textit{"Privilege escalation is not allowed"}. Al restaurar P5, el pod volvió a ser admitido con el valor mutado. Este experimento confirma empíricamente que, en el diseño adoptado, la mutación tiene \textit{precedencia absoluta} sobre la validación, y que las políticas de validación complementan pero no sustituyen a las de mutación como mecanismo de seguridad principal.
+Este comportamiento fue verificado deshabilitando temporalmente P5 y aplicando el mismo pod: en ausencia de la mutación, P2 rechazó correctamente la solicitud. Al restaurar P5, el pod volvió a ser admitido con el valor mutado. Este experimento confirma empíricamente que, en el diseño adoptado, la mutación tiene \textit{precedencia absoluta} sobre la validación, y que las políticas de validación complementan pero no sustituyen a las de mutación como mecanismo de seguridad principal.
 
 % ─────────────────────────────────────────────
 \section{Policy Reports: auditoría de cumplimiento}
 % ─────────────────────────────────────────────
 
-El Reports Controller de Kyverno genera automáticamente recursos \texttt{PolicyReport} (con alcance de namespace) y \texttt{ClusterPolicyReport} (con alcance de clúster) que consolidan los resultados de la evaluación de todas las políticas sobre todos los recursos del sistema. Estos informes constituyen el mecanismo de auditoría de cumplimiento nativo del sistema y permiten responder de forma centralizada a la pregunta: ¿qué recursos del clúster están en conformidad con las políticas de seguridad?
+El Reports Controller de Kyverno genera automáticamente recursos \texttt{PolicyReport} (con alcance de namespace) y \texttt{ClusterPolicyReport} (con alcance de clúster) que consolidan los resultados de la evaluación de todas las políticas sobre todos los recursos del sistema. Estos informes constituyen el mecanismo de auditoría de cumplimiento nativo y permiten responder de forma centralizada a la pregunta: ¿qué recursos del clúster están en conformidad con las políticas de seguridad?
 
-La Figura~\ref{fig:clusterpolicyreports} muestra el \texttt{ClusterPolicyReport} generado para el namespace \texttt{test-networkpolicy}: el recurso de tipo \texttt{Namespace} con ese nombre ha superado la evaluación de la política P8 (\texttt{generate-networkpolicy-metadata}), con un resultado de 1 PASS y 0 FAIL.
+La Figura~\ref{fig:clusterpolicyreports} muestra el \texttt{ClusterPolicyReport} generado para el namespace \texttt{test-networkpolicy}: el recurso de tipo \texttt{Namespace} ha superado la evaluación de P8, con resultado 1~PASS y 0~FAIL.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/kubectl get clusterpolicyreports.png}
 \caption{ClusterPolicyReport: evaluación de la política de generación sobre el namespace de prueba}
 \label{fig:clusterpolicyreports}
 \end{figure}
 
-La Figura~\ref{fig:policyreports} muestra los \texttt{PolicyReport} del namespace \texttt{default}, uno por cada pod activo. Los tres pods — \texttt{pod-seguro-completo}, \texttt{test-mutate-resources} y \texttt{test-mutate-seccontext} — registran 7 PASS y 0 FAIL.
+La Figura~\ref{fig:policyreports} muestra los \texttt{PolicyReport} del namespace \texttt{default}, uno por cada pod activo. Los tres pods — \texttt{pod-seguro-completo}, \texttt{test-mutate-resources} y \texttt{test-mutate-sec\-context} — registran 7~PASS y 0~FAIL.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\linewidth]{kyverno/kubectl get policyreports -A.png}
 \caption{PolicyReports del namespace \texttt{default}: 7 PASS por pod, 0 infracciones}
 \label{fig:policyreports}
 \end{figure}
 
-El valor 7 corresponde exactamente al número de políticas que evalúan recursos de tipo \texttt{Pod} (P1 a P7), confirmando que todos los pods activos en el clúster cumplen la totalidad de las políticas desplegadas. La política P8 no aparece en estos informes porque su alcance es sobre recursos de tipo \texttt{Namespace}, no \texttt{Pod}, y sus resultados se reflejan en los \texttt{ClusterPolicyReport} de la Figura~\ref{fig:clusterpolicyreports}.
-
-Estos informes demuestran que el sistema implementado no solo actúa en tiempo de admisión, sino que proporciona visibilidad continua sobre el estado de cumplimiento del clúster — un requisito fundamental en entornos DevSecOps orientados a la auditoría y el cumplimiento normativo.
+El valor 7 corresponde exactamente al número de políticas que evalúan recursos de tipo \texttt{Pod} (P1 a P7). La política P8 no aparece en estos informes porque su alcance es sobre recursos de tipo \texttt{Namespace}, y sus resultados se reflejan en los \texttt{ClusterPolicyReport} de la Figura~\ref{fig:clusterpolicyreports}. Estos informes demuestran que el sistema implementado no solo actúa en tiempo de admisión, sino que proporciona visibilidad continua sobre el estado de cumplimiento del clúster —un requisito fundamental en entornos DevSecOps orientados a la auditoría y el cumplimiento normativo.

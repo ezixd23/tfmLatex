@@ -1,0 +1,17 @@
+\glossaryentry{REST API?\glossentry{api_rest}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{GitOps?\glossentry{gitops}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{CNI?\glossentry{cni}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Drift protection?\glossentry{drift_protection}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Auto-hardening?\glossentry{auto_hardening}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{IMDS?\glossentry{imds}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Supply chain attack?\glossentry{supply_chain_attack}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{PolicyReport?\glossentry{policy_report}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Webhook?\glossentry{webhook}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{etcd?\glossentry{etcd}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Hardening?\glossentry{hardening}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{CIDR?\glossentry{cidr}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Two-repository pattern (GitOps)?\glossentry{two_repo_gitops}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{QoS (Kubernetes)?\glossentry{qos_kubernetes}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{patchStrategicMerge?\glossentry{patchstrategicmerge}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Runner (GitHub Actions)?\glossentry{runner}|setentrycounter[]{page}"\glsnumberformat}{79}
+\glossaryentry{Multi-tenant?\glossentry{multi_tenant}|setentrycounter[]{page}"\glsnumberformat}{79}

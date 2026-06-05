@@ -1,0 +1,164 @@
+\chapter{Architecture Design}
+
+This chapter describes the architectural design of the DevSecOps environment implemented in this work. It presents the overall system vision, the role of each component, the complete CI/CD flow with integrated security, the network topology of the laboratory cluster and, finally, the design decisions that have guided the construction of the environment and the technical reasons that justify them.
+
+% ─────────────────────────────────────────────
+\section{General system architecture}
+% ─────────────────────────────────────────────
+
+The system architecture is organised into three clearly differentiated functional planes: the development plane, the automation plane and the execution plane. This separation is not merely conceptual, but reflects a real division of responsibilities between system components and the moments in the lifecycle when each one acts.
+
+The \textbf{development plane} encompasses the set of activities performed by the engineering team: writing application code, defining Kubernetes manifests and formulating security policies. All this production materialises as commits on Git repositories, which constitute the system's source of truth.
+
+The \textbf{automation plane} comprises the mechanisms that process changes introduced in the repositories and transform the code into deployable artefacts, verifying their security in the process. This plane encompasses the continuous integration pipeline managed by GitHub Actions, which builds container images and subjects them to vulnerability analysis using Trivy, and the GitOps controller implemented by ArgoCD, which detects differences between the desired state defined in Git and the real state of the cluster and applies the necessary reconciliations.
+
+The \textbf{execution plane} corresponds to the Kubernetes cluster, where workloads are finally deployed and where Kyverno acts as the last line of defence, intercepting every resource creation or modification request to apply the defined security policies before any object is persisted in the system.
+
+Figure~\ref{fig:arquitectura-general} illustrates the global system architecture, showing the relationship between the three planes and the information flows between them.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{arquitectura/fig5-1-arquitectura-general.png}
+\caption{General architecture of the DevSecOps environment}
+\label{fig:arquitectura-general}
+\end{figure}
+
+A central architectural aspect is the adoption of the \textbf{two-repository pattern} for the implementation of the GitOps model. The application repository contains the source code of the workloads and business logic, while the configuration repository --- commonly known as the \textit{GitOps repo} --- stores Kubernetes manifests, Kyverno policies and infrastructure configurations. This separation allows the CI pipeline to modify only the configuration repository (updating the image tag after a successful build) without ArgoCD needing access to the application source code, reducing the attack surface and clarifying the responsibilities of each component.
+
+% ─────────────────────────────────────────────
+\section{Component description}
+% ─────────────────────────────────────────────
+
+\subsection{Kubernetes cluster}
+
+The Kubernetes cluster constitutes the execution platform on which the entire system is based. Following the architecture described in Chapter~4, it consists of two nodes: a control node (\texttt{192.168.1.101}) and a worker node (\texttt{192.168.1.102}), both running Ubuntu Server 24.04 LTS on VirtualBox virtual machines.
+
+The \textbf{API Server} is the central component of the control plane and the only entry point for all cluster operations. All system tools --- ArgoCD, Kyverno, \texttt{kubectl} --- interact exclusively through the API Server, which exposes a RESTful API and applies authentication, authorisation and admission control mechanisms to each received request \cite{kubernetes_docs}. It is precisely in this component where Kyverno's webhooks are registered to intercept admission traffic.
+
+The \textbf{etcd} store persists the complete cluster state as distributed key-value pairs. No resource reaches etcd without having gone through the complete admission process, which guarantees that the persisted state always complies with the defined security policies.
+
+\subsection{Kyverno}
+
+Kyverno is deployed in the dedicated namespace \texttt{kyverno} and operates through four independent controllers, each with well-defined responsibilities \cite{kyverno_docs}:
+
+The \textbf{Admission Controller} is the critical component for this work. It registers in the API Server via two objects of type \texttt{Mutating\-Webhook\-Configuration} and \texttt{Validating\-Webhook\-Configuration}, which instruct the API Server to route admission requests to Kyverno before persisting them. This controller evaluates \textit{mutate} and \textit{validate} policies in real time, with a latency that must remain below the timeout threshold configured in the webhook (by default, 10 seconds).
+
+The \textbf{Background Controller} evaluates policies over resources already existing in the cluster. This is especially relevant for \textit{generate} policies: when the \texttt{generate-networkpolicy-metadata} policy is applied, the Background Controller is responsible for retroactively generating NetworkPolicies in namespaces that already existed before the policy was deployed.
+
+The \textbf{Reports Controller} generates and keeps updated \texttt{PolicyReport} and \texttt{ClusterPolicyReport} resources, which consolidate the results of evaluating all policies over all cluster resources. These reports are fundamental for compliance auditing.
+
+The \textbf{Cleanup Controller} manages the scheduled deletion of resources generated by \textit{generate} policies when the resource that originated them is deleted, maintaining cluster consistency.
+
+\subsection{ArgoCD}
+
+ArgoCD implements the GitOps paradigm by acting as a continuous reconciliation operator between the state declared in the configuration repository and the real state of the cluster \cite{argocd_docs}. Its internal architecture consists of several sub-components: the \textit{Application Controller} is the core that detects state differences (\textit{diff}) and applies reconciliations; the \textit{Repo Server} manages connections to Git repositories and the rendering of manifests; and the \textit{API Server} exposes the user interface and management API.
+
+In the context of this work, ArgoCD manages Kyverno policies like any other Kubernetes resource: the \texttt{ClusterPolicy} objects stored in the configuration repository are automatically synchronised to the cluster. This means that any policy modification --- correction, hardening or new policy --- follows the same versioned approval workflow as any infrastructure change, guaranteeing complete traceability.
+
+ArgoCD's \textit{self-healing} capability directly complements Kyverno's \textit{drift protection} mechanism: if someone manually modifies a policy in the cluster, ArgoCD detects the deviation and reverts it to the state defined in Git; if someone deletes a NetworkPolicy generated by Kyverno, the Background Controller of Kyverno regenerates it. Both layers work in a coordinated manner to guarantee that the system state always remains aligned with what is defined in the repository.
+
+\subsection{GitHub Actions and Trivy}
+
+GitHub Actions acts as the continuous integration engine, running automatically on each \textit{push} to the application repository \cite{github_actions_docs}. The pipeline builds the container image, invokes Trivy to perform a vulnerability analysis \cite{trivy_docs} and, only if the analysis does not detect critical vulnerabilities, publishes the image to the registry and updates the image tag in the configuration repository.
+
+The security of the pipeline itself deserves specific attention. The supervisor's alert about the TeamPCP group attack, which compromised CI/CD pipelines by manipulating third-party GitHub Actions \cite{teampcp2026}, motivates two concrete design decisions detailed in Section~\ref{sec:decisiones}: the anchoring of action versions via SHA hash and the limitation of runner token permissions to the minimum necessary.
+
+\subsection{Sysdig Secure}
+
+Sysdig Secure adds the runtime security dimension to the environment, complementing Kyverno's preventive controls with anomalous behaviour detection during pod execution \cite{sysdig_secure}. As a SaaS service, its integration with the virtual machine-based laboratory environment may present technical limitations, as documented in Chapter~4. Nevertheless, its architectural role is relevant: while Kyverno acts at deployment time, Sysdig Secure acts during execution, covering the attack surface that cannot be statically controlled.
+
+% ─────────────────────────────────────────────
+\section{DevSecOps deployment flow}
+% ─────────────────────────────────────────────
+
+The complete system flow can be described in two differentiated phases: the continuous integration phase, the responsibility of GitHub Actions, and the continuous deployment phase, the responsibility of ArgoCD and Kyverno. The explicit separation between CI and CD is an intentional architectural decision justified in Section~\ref{sec:decisiones}.
+
+\subsection{Continuous integration phase}
+
+The CI flow begins when a developer performs a \textit{push} to the main branch of the application repository. GitHub Actions detects the event and launches the defined workflow, which executes the following steps sequentially:
+
+First, the container image is built from the repository's Dockerfile. Next, Trivy analyses the resulting image for known vulnerabilities, consulting its CVE database. If the analysis detects critical or high severity vulnerabilities, the pipeline fails at this point and the image is not published, preventing vulnerable code from reaching the execution environment. If the analysis is satisfactory, the image is published to the container registry with a tag that includes the commit hash, guaranteeing traceability between the deployed artefact and the source code that generated it.
+
+The last step of the CI pipeline updates the deployment manifest in the configuration repository, replacing the previous image tag with the new one. This commit in the configuration repository acts as a trigger signal for the CD phase.
+
+Figure~\ref{fig:flujo-cicd} illustrates this complete CI/CD flow.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{arquitectura/fig5-2-flujo-cicd.png}
+\caption{Continuous integration and deployment flow with security analysis}
+\label{fig:flujo-cicd}
+\end{figure}
+
+\subsection{Continuous deployment and admission phase}
+
+ArgoCD periodically monitors the configuration repository. Upon detecting the new commit introduced by the CI pipeline, it computes the difference between the updated manifest and the current cluster state and initiates synchronisation, sending the resource update request to the Kubernetes API Server.
+
+At this point, Kyverno intervenes through the Admission Controllers mechanism. The Kubernetes admission process follows a determined sequence \cite{kubernetes_docs} illustrated in Figure~\ref{fig:flujo-admision}:
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.90\linewidth]{arquitectura/fig5-3-flujo-admision.png}
+\caption{Kyverno admission flow: mutation before validation}
+\label{fig:flujo-admision}
+\end{figure}
+
+After request authentication and authorisation, the API Server invokes the registered \textit{mutating admission webhooks}. Kyverno receives the object in its original state and sequentially applies all active \textit{mutate} policies: it injects CPU and memory limits and requests (P4), completes the container's \texttt{securityContext} with the missing secure configurations (P5), forces the read-only filesystem (P6) and adds traceability labels (P7). The object returned to the API Server is already the version enriched with all security configurations.
+
+Next, the API Server invokes the \textit{validating admission webhooks}. Kyverno evaluates the \textit{validate} policies over the already mutated object. Since mutation has previously applied the secure configurations, the vast majority of pods pass this validation without rejection. Validation policies act as a final barrier for cases that mutation cannot resolve: the use of images from unauthorised registries (P3), explicit execution as root user when the developer has deliberately specified it (P1) or explicit privilege escalation request (P2). If any validation policy rejects the object, the API Server returns an error with the message defined in the policy and the resource is not persisted in etcd.
+
+If the object passes all admission webhooks, it is persisted in etcd, the Scheduler determines on which node it should run and the kubelet on the worker node proceeds with pod creation.
+
+\section{Cluster network architecture}
+
+The network topology of the laboratory environment is structured in three layers, as shown in Figure~\ref{fig:red-cluster}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\linewidth]{arquitectura/fig5-4-red-cluster.png}
+\caption{Network architecture of the laboratory cluster}
+\label{fig:red-cluster}
+\end{figure}
+
+The \textbf{management layer} corresponds to VirtualBox's \textit{host-only} network (\texttt{192.168.1.0/24}), through which the host machine and both cluster nodes communicate. The nodes have statically assigned IP addresses: \texttt{192.168.1.101} for the control node and \texttt{192.168.1.102} for the worker node. All internal cluster communication --- between the API Server and kubelets, between the API Server and Kyverno and ArgoCD controllers --- transits through this network. Additionally, each node has a VirtualBox NAT interface that provides internet access, used for downloading container images and communication with external services such as GitHub or image registries.
+
+The \textbf{pod layer} is managed by Calico \cite{calico_docs}, which assigns a private addressing space (\texttt{172.16.0.0/16}) to cluster pods. Calico implements Kubernetes Network Policies through \texttt{iptables} or eBPF rules, depending on the configuration, guaranteeing that the traffic restrictions defined in the policies are applied effectively. This implementation is a requirement for the project's policy P8: the NetworkPolicy generated by Kyverno to block access to the cloud metadata service (\texttt{169.254.169.254/32}) only takes effect if the underlying CNI plugin respects and applies Kubernetes Network Policies, a condition that Calico natively meets.
+
+The \textbf{service layer} uses the addressing space \texttt{10.96.0.0/12}, reserved by kubeadm for \texttt{ClusterIP} type \texttt{Service} objects. The services of system components --- API Server (\texttt{10.96.0.1}), ArgoCD Server, Kyverno --- are accessible within the cluster through this address space, while external access to the API Server is achieved directly through the control node IP via port 6443.
+
+% ─────────────────────────────────────────────
+\section{Design decisions}
+\label{sec:decisiones}
+% ─────────────────────────────────────────────
+
+The architectural decisions adopted in the system design are not arbitrary, but respond to specific technical and security requirements. This section documents the most relevant ones and justifies each of them.
+
+\subsection{Separation between CI and CD}
+
+The separation between continuous integration (GitHub Actions) and continuous deployment (ArgoCD) is a deliberate architectural decision, rather than a single pipeline that builds and deploys in one sequence. This separation offers several advantages. First, it decouples the necessary credentials: the CI pipeline needs access to the image registry and configuration repository, but not to the Kubernetes cluster; ArgoCD has access to the cluster but not to the source code. This segregation reduces the blast radius of a possible compromise of either component. Second, it allows applying security controls at the boundary between the two phases: the image is only published if it passes the Trivy analysis, and ArgoCD only deploys what is in the configuration repository, which acts as an audited control point.
+
+\subsection{ClusterPolicy scope vs. Policy}
+
+Kyverno allows defining policies with cluster scope (\texttt{ClusterPolicy}) or namespace scope (\texttt{Policy}). In this work, exclusively \texttt{ClusterPolicy} objects are used, which guarantees that security policies apply to all cluster namespaces without exceptions. A namespaced policy could inadvertently be omitted when creating a new namespace, creating a coverage gap. The use of \texttt{ClusterPolicy} implements the \textit{secure by default} principle: security is applied everywhere unless explicitly excluded through documented exception rules.
+
+\subsection{Enforce mode vs. Audit mode}
+
+Kyverno can operate in two modes: \texttt{Enforce}, which actively blocks resources that violate policies, and \texttt{Audit}, which allows deployment but records violations in PolicyReports. In this work, validation policies operate in \texttt{Enforce} mode, which guarantees that no non-compliant resource reaches the cluster. Although in a real production environment it is usually recommended to start in \texttt{Audit} mode to avoid disruptions, in the context of this laboratory environment \texttt{Enforce} mode is what effectively demonstrates the blocking mechanism and its real effect on deployments.
+
+\subsection{Mutation before validation as a hardening strategy}
+
+The Kubernetes webhook execution order --- mutation before validation --- is deliberately leveraged as an automatic \textit{hardening} strategy. Mutation policies are not optional complements, but the main security mechanism of the system: instead of rejecting pods with incomplete configurations (which would create friction for developers), Kyverno automatically completes them with the correct security profile. Validation policies act only on configurations that cannot be resolved through mutation, such as the use of unauthorised image registries or the presence of explicitly declared privileges.
+
+This strategy aligns security with usability: the developer can work with minimal manifests and obtain a correctly secured pod without needing to know in detail all Kubernetes security fields. The responsibility for compliance rests on the platform, not on the developer.
+
+\subsection{synchronize: true in generation policies}
+
+Policy P8 uses the \texttt{synchronize: true} field in its \textit{generate} type definition. This configuration instructs Kyverno's Background Controller to monitor generated resources and recreate them automatically if they are deleted or modified in an unauthorised manner. This decision implements the \textit{drift protection} principle at the level of security resources: the NetworkPolicy that blocks access to the IMDS cannot be permanently deleted by an operator (intentionally or accidentally), as Kyverno will regenerate it within seconds. Without this field, generation would be a one-time event and protection could be circumvented.
+
+\subsection{Pipeline supply chain security}
+
+The compromise of the TeamPCP group over CI/CD pipelines \cite{teampcp2026} illustrates that the automation pipeline itself can become an attack vector. In response to this threat, the pipeline design adopts two concrete measures. The first is the anchoring of GitHub Actions versions via their full SHA hash, rather than floating tags such as \texttt{@latest} or \texttt{@v3}, which can be redirected to malicious versions without modifying the reference name. The second is the configuration of the GitHub token with minimum permissions (\textit{least privilege}): the runner only has the permissions strictly necessary for its function, limiting the impact of a possible compromise of the execution environment.
+
+\subsection{Choice of Calico as CNI plugin}
+
+The choice of Calico \cite{calico_docs} over alternatives such as Flannel or Weave responds to a direct functional requirement: policy P8 requires that Kubernetes Network Policies be effectively applied by the CNI plugin. Flannel, for example, does not natively support Network Policies. Calico, on the other hand, is one of the reference CNI plugins in production environments and provides a complete implementation of the Kubernetes Network Policy model, guaranteeing that the traffic blocking rules generated by Kyverno have a real effect on pod network communication.

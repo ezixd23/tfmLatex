@@ -1,0 +1,160 @@
+\chapter{Theoretical Framework and Reference Analysis}
+
+\section{Evolution from the DevOps to the DevSecOps paradigm}
+
+\subsection{Limitations of traditional models}
+
+Traditional software development models, such as the waterfall model, are characterised by a strict separation of phases (analysis, development, testing and deployment), which hinders the early detection of errors and vulnerabilities \cite{pressman2019software}. In these approaches, security is usually introduced in the final stages, significantly increasing the cost of correction and the risk in production.
+
+The adoption of agile methodologies and, subsequently, the DevOps paradigm improved collaboration between teams and accelerated delivery cycles \cite{kim2016devops}. However, various studies highlight that security continued to be treated as an independent process, generating vulnerabilities especially in cloud-native environments \cite{sharma2020devsecops}.
+
+In this context, the need to integrate automated security mechanisms that can be applied continuously within the software lifecycle becomes evident.
+
+\subsection{Integration of security in the software lifecycle}
+
+The evolution towards DevSecOps implies integrating security from the earliest phases of development, incorporating automated controls in CI/CD pipelines \cite{behl2017devsecops}. This includes vulnerability analysis, configuration validation and compliance control.
+
+Automation enables consistency and reduces human errors, especially in dynamic environments. According to \cite{rahman2019devsecops}, the early integration of security significantly improves software resilience.
+
+This approach is key in the present work, where security is implemented through automated mechanisms integrated in Kubernetes.
+
+\subsection{Birth of the DevSecOps concept}
+
+DevSecOps emerged as a natural evolution of DevOps, integrating security as an intrinsic component of the software lifecycle \cite{mohan2016towards}. This paradigm promotes the automation of security controls and shared responsibility across teams.
+
+In container and Kubernetes-based environments, this approach requires mechanisms capable of applying security policies dynamically and at scale.
+
+In this work, this objective is materialised through the use of Policy-as-Code and tools such as Kyverno, which enable declarative and automated security enforcement.
+
+\section{Kubernetes as an execution platform}
+
+\subsection{Kubernetes architecture}
+
+Kubernetes has consolidated itself as the de facto standard for container orchestration, providing a robust platform for the management of distributed applications \cite{burns2016borg}.
+
+Its architecture is based on a control plane, which manages the state of the system, and worker nodes responsible for running workloads. The API Server acts as the central interaction point through a declarative model \cite{kubernetes_docs}.
+
+This architecture enables automated system management, but also introduces new security challenges that must be addressed through specific mechanisms.
+
+\subsection{Main cluster components}
+
+The main control plane components include the API Server, the Scheduler and the Controller Manager, responsible for processing requests and maintaining the desired state of the system. On worker nodes, the kubelet and the container runtime enable the execution of pods \cite{kubernetes_docs}.
+
+The existence of multiple distributed components makes it necessary to implement centralised security controls, such as Admission Controllers.
+
+\subsection{Network management and Network Policies}
+
+By default, Kubernetes allows free communication between pods, which can represent a significant risk. Network Policies allow defining communication rules based on labels and namespaces, applying the principle of least privilege \cite{kubernetes_docs}.
+
+Furthermore, in real environments it is common to find insecure configurations such as:
+
+\begin{itemize}
+\item Containers running as the root user
+\item Privilege escalation enabled
+\item Missing resource limits
+\item Unrestricted network access
+\end{itemize}
+
+These practices pose a high risk, especially in \textit{multi-tenant} environments ---where multiple teams, applications or clients share a single Kubernetes cluster with logical isolation via namespaces--- since a compromise in one workload can propagate to others if there are no adequate network, execution and privilege controls.
+
+This justifies the need to apply automatic controls at deployment time through Kubernetes security policies.
+
+\section{Policy-as-Code and Admission Controllers}
+
+\subsection{How Admission Controllers work}
+
+Admission Controllers are API Server mechanisms that intercept requests before resources are deployed in the cluster \cite{kubernetes_docs}. They allow applying validations or modifications to objects.
+
+This mechanism constitutes the technical basis on which security is implemented in this work.
+
+\subsection{Resource validation vs. mutation}
+
+\textit{Validating admission controllers} allow verifying that resources comply with certain policies, rejecting those that do not satisfy them.
+
+On the other hand, \textit{mutating admission controllers} allow automatically modifying resources before their creation, applying secure default configurations.
+
+In this work, special emphasis is placed on \textit{mutating} policies, as they enable automatic hardening mechanisms to be applied to manifests, correcting insecure configurations without user intervention.
+
+This approach is key to ensuring security in highly automated DevSecOps environments.
+
+\subsection{Importance of declarative security}
+
+The Policy-as-Code approach allows defining security policies as versioned code, facilitating their integration into GitOps workflows \cite{huttermann2022devops}.
+
+This model improves traceability, reproducibility and automation of security.
+
+In this work, these mechanisms are implemented using Kyverno to automatically apply policies at deployment time.
+
+\section{Tools and technologies used}
+
+\subsection{Kyverno}
+
+Kyverno is a Policy-as-Code tool designed specifically for Kubernetes that allows defining policies using YAML, without the need to learn additional languages \cite{kyverno_docs}.
+
+Unlike other solutions, Kyverno allows defining policies directly in the same format used by Kubernetes, which facilitates its adoption. Furthermore, it supports both validation and mutation policies, enabling not only the blocking of insecure configurations but also their automatic correction.
+
+This capability is especially relevant in DevSecOps environments, where automation and consistency are key factors.
+
+Kyverno constitutes the central axis of this work.
+
+\subsection{OPA Gatekeeper}
+
+Open Policy Agent (OPA) is a general-purpose policy engine that allows defining rules using the Rego language \cite{opa_docs}. Gatekeeper facilitates its integration with Kubernetes.
+
+Although it offers great flexibility, its complexity and validation-focused approach differentiate it from Kyverno.
+
+\subsection{ArgoCD and GitOps}
+
+ArgoCD implements the GitOps paradigm, where the state of the system is defined in Git repositories \cite{weaveworks_gitops}.
+
+In this work, it is used to automate deployment and ensure consistency between configuration and real state.
+
+\subsection{GitHub Actions}
+
+GitHub Actions enables the automation of CI/CD pipelines, including build, test and security processes \cite{github_actions_docs}.
+
+It is used to integrate security controls within the DevSecOps workflow.
+
+\subsection{Trivy and Sysdig Secure}
+
+Trivy enables vulnerability scanning of container images \cite{trivy_docs}, while Sysdig Secure provides runtime security \cite{sysdig_secure}.
+
+These tools complement the security applied through Kubernetes policies.
+
+\section{Theoretical comparison: Kyverno vs OPA}
+
+Kyverno and Open Policy Agent (OPA) represent two of the most relevant solutions within the \textit{Policy-as-Code} approach applied to Kubernetes. Both allow defining and applying security policies over cluster resources, although they present significant differences in terms of design, approach and capabilities \cite{opa_docs, kyverno_docs}.
+
+Kyverno is a \textit{Kubernetes-native} tool that allows defining policies using the same YAML format used in the system's own manifests. This approach reduces complexity and facilitates adoption by DevOps teams familiar with Kubernetes. By contrast, OPA uses the Rego language, a general-purpose declarative language that offers great flexibility but introduces a steeper learning curve.
+
+From a functional standpoint, both tools support the implementation of validation policies (\textit{validating}), that is, checking that resources meet certain conditions before being deployed. However, a key difference lies in the support for mutation policies (\textit{mutating}). Kyverno allows automatically modifying resources at admission time, applying secure default configurations, while OPA Gatekeeper focuses primarily on validation, lacking native support for resource mutation.
+
+The following table presents a summarised comparison of both tools:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Feature} & \textbf{Kyverno} & \textbf{OPA Gatekeeper} \\
+\midrule
+Approach & Kubernetes-native & General-purpose \\
+Policy language & YAML & Rego \\
+Learning curve & Low & High \\
+Resource validation & Yes & Yes \\
+Resource mutation & Yes & No (limited) \\
+Kubernetes integration & Native & Via CRDs \\
+Ease of adoption & High & Medium \\
+\bottomrule
+\end{tabular}
+\caption{Comparison between Kyverno and OPA Gatekeeper}
+\label{tab:kyverno-vs-opa}
+\end{table}
+
+
+These differences have a direct impact on their applicability in DevSecOps environments. While OPA offers greater expressiveness and flexibility for defining complex policies, Kyverno stands out for its operational simplicity and its ability to integrate naturally into Kubernetes-based workflows.
+
+From the perspective of this work, Kyverno's mutation capability is especially relevant, as it allows implementing automatic \textit{hardening} mechanisms over manifests, correcting insecure configurations without the need for manual intervention. This includes, for example, the automatic addition of resource limits, the disabling of elevated privileges or the application of default network policies.
+
+Consequently, Kyverno is positioned as a tool especially suited for environments where automation, consistency and integration with GitOps practices are prioritised.
+
+This theoretical comparison will serve as the basis for the practical analysis developed in later chapters, where the behaviour of both solutions will be evaluated in a real Kubernetes environment.

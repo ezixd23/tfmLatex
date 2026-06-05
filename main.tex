@@ -4,6 +4,9 @@
 \usepackage{verbatim} % Comentaris multilínea
 \usepackage{graphicx} % Per insertar imatges
 \usepackage{float} % Posicionament d'imatges
+\usepackage{xcolor} % Colors per a blocs de codi
+\usepackage{listings} % Blocs de codi i manifests YAML
+\usepackage{microtype} % Micro-tipografia: millora justificació i evita overfull hbox
 
 \usepackage[spanish]{babel} % Idioma
 \usepackage{fancyhdr} % Per personalitzar capçaleres i peus de pàgina
@@ -13,7 +16,7 @@
 \usepackage{hyperref} % Afegeix glossari a la taula de continguts
 \usepackage{setspace} % Per ajustar l'interlineat
 \usepackage{titlesec} % Paquet per personalitzar els títols
-\usepackage{times} % Paquet per fonts Times New Roman
+\usepackage{newtxtext,newtxmath} % Paquet per fonts Times New Roman
 \usepackage[nottoc, numbib]{tocbibind} % Inclou bibliografia i índexs automàticament al ToC
 \usepackage[nonumberlist, toc]{glossaries} % Paquet per a la generació del glossari
 \usepackage[style=ieee, backend=biber]{biblatex} % Paquet per gestionar la bibliografia en format IEEE
@@ -27,6 +30,34 @@
 \setacronymstyle{long-short}
 
 \makeglossaries
+
+% ── Estil per a blocs de codi, comandes i manifests YAML ────────────────────
+\definecolor{codbg}{RGB}{247,247,247}
+\definecolor{codborder}{RGB}{210,210,210}
+\lstdefinestyle{tfmcode}{
+  backgroundcolor  = \color{codbg},
+  basicstyle       = \ttfamily\small,
+  breaklines       = true,
+  breakatwhitespace= false,
+  postbreak        = \mbox{{\footnotesize$\hookrightarrow$}\space},
+  frame            = single,
+  rulecolor        = \color{codborder},
+  framesep         = 5pt,
+  xleftmargin      = 8pt,
+  xrightmargin     = 8pt,
+  keepspaces       = true,
+  columns          = flexible,
+  showstringspaces = false,
+  tabsize          = 2,
+  aboveskip        = 4pt,
+  belowskip        = 4pt,
+  literate =
+    {á}{{\'{a}}}1 {é}{{\'{e}}}1 {í}{{\'{i}}}1 {ó}{{\'{o}}}1 {ú}{{\'{u}}}1
+    {Á}{{\'{A}}}1 {É}{{\'{E}}}1 {Í}{{\'{I}}}1 {Ó}{{\'{O}}}1 {Ú}{{\'{U}}}1
+    {ñ}{{\~{n}}}1 {Ñ}{{\~{N}}}1
+}
+\lstset{style=tfmcode}
+% ────────────────────────────────────────────────────────────────────────────
 
 % Reduir espai abans i després de cada capítol
 \titleformat{\chapter}[block]{\normalfont\fontsize{18pt}{0pt}\bfseries}{\thechapter}{1em}{}
@@ -121,26 +152,6 @@
 \onehalfspacing % Interlineat de 1,5
 \setlength{\parskip}{12pt} % Espaiat anterior als paràgrafs
 
-\glsaddall
-\printglossary
-
-\begin{comment}
-*****************************************************************************
-*                           IMPORTANT!!!                                    *
-*   Les següents dues comandes (\newpage, \null) estàn destinades a crear   *
-*   una pàgina buida, això és degut a que en realitzar el canvi de          *
-*   numeració (de romana a aràbiga), en crear un nou \chapter, no detecta   *
-*   automàticament si la última pàgina es parell o imparell, per tant, un   *
-*   cop acabat el glossari, cal comprovar si acaba en pàgina parell o       *
-*   imparell, en aquest últim cas, cal afegir manualment una pàgina         *
-*   en blanc, doncs sino es pot donar el cas que el glossari acabi en       *
-*   la pàgina IX, i la següent pàgina sigui la 1, tractades les dues com    *
-*   imparells.                                                              *
-*****************************************************************************
-\end{comment}
-\newpage % Afegir nova pàgina, només en cas que el glossari acabi en pàgina imparell
-\null
-\newpage % Comença una nova pàgina per assegurar que la numeració sigui consistent
 % Configuració de capçaleres i peus de pàgina principals
 \fancypagestyle{plain}{
     \fancyhf{} % Esborrem configuracions prèvies
@@ -158,8 +169,12 @@
 \input{chapters/04_metodologia.tex}
 \input{chapters/05_arquitectura.tex}
 \input{chapters/06_implementacion.tex}
+\input{chapters/07_argocd.tex}
 \cleardoublepage % Garanteix que la bibliografia comenci en una pàgina imparell
 \phantomsection % Marca la pàgina correcta per a la taula de continguts
 \addcontentsline{toc}{chapter}{Bibliografia} % Afegeix la bibliografia al ToC
 \printbibliography % Imprimeix la bibliografia
+\cleardoublepage
+\glsaddall
+\printglossary
 \end{document}

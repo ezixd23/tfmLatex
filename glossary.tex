@@ -77,3 +77,8 @@
     name={Runner (GitHub Actions)},
     description={Agente de ejecución que procesa los jobs definidos en los workflows de GitHub Actions. Puede ser un runner hospedado por GitHub (\textit{hosted runner}) o un runner autogestionado en infraestructura propia (\textit{self-hosted runner}). Los runners ejecutan cada paso del pipeline en un entorno aislado y son el objetivo de ataques de tipo supply chain que buscan comprometer el proceso de build o exfiltrar credenciales del entorno de CI}
 }
+
+\newglossaryentry{multi_tenant}{
+    name={Multi-tenant},
+    description={Modelo de despliegue de Kubernetes en el que un único clúster es compartido por múltiples equipos, aplicaciones o clientes (denominados \textit{tenants}) con aislamiento lógico mediante namespaces, RBAC y Network Policies. Este modelo optimiza el uso de recursos pero introduce desafíos de seguridad relacionados con el aislamiento entre \textit{tenants}, especialmente en escenarios donde un compromiso en una carga de trabajo podría propagarse a otras}
+}

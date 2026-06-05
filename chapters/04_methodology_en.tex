@@ -1,0 +1,124 @@
+\chapter{Project Methodology}
+
+This chapter describes the methodological approach adopted to carry out the Master's Thesis. This is not a technical chapter, but rather a reasoned description of how the work has been planned, what decisions have been made regarding scope and project organisation, and what criteria have guided tool selection and the definition of development phases. Many of these decisions were agreed upon with the supervisor, Josep Andreu, through various meetings and communications that have progressively refined the approach of the work.
+
+% ─────────────────────────────────────────────
+\section{General project approach}
+% ─────────────────────────────────────────────
+
+The project adopts an approach of \textbf{applied research with practical development}. The objective is not to carry out an exhaustive theoretical review of Kubernetes security standards, but to build a real functional environment that demonstrates how to integrate security in an automated manner within the development and deployment lifecycle. Results are validated empirically through controlled tests on the implemented environment, not through bibliographic analysis.
+
+The supervisor oriented the work towards a manageable number of between five and ten well-chosen security policies, with the argument that demonstrating the functioning and deep understanding of Kyverno is academically more valuable than applying a complete standard superficially. This guideline has shaped the entire project planning: quality and justification of each decision are prioritised over the quantity of elements implemented.
+
+Development follows an \textbf{iterative and incremental} model: starting with the most fundamental components (the cluster and Kyverno), validating each element before adding the next, and progressively advancing towards components of greater complexity (ArgoCD, GitHub Actions, comparison with OPA). This model enables early detection of integration problems and guarantees that the environment is functional at all times, even before it is complete.
+
+% ─────────────────────────────────────────────
+\section{Laboratory environment}
+% ─────────────────────────────────────────────
+
+The environment on which the project is developed consists of a Kubernetes cluster deployed on two virtual machines provided by the supervisor, managed with VirtualBox. This decision was agreed upon during the initial exchange with Josep Andreu, who recommended using the virtual machine images used in the course subject to guarantee coherence and stability.
+
+The two virtual machines have the following roles and fixed IP addresses within the laboratory network:
+
+\begin{itemize}
+    \item \textbf{Control node} (\textit{control plane}): \texttt{192.168.1.101}, hostname \texttt{control}. Hosts the Kubernetes control plane and acts as the entry point for all cluster administration operations.
+    \item \textbf{Worker node}: \texttt{192.168.1.102}, hostname \texttt{worker}. Executes the workloads deployed in the cluster.
+\end{itemize}
+
+Each virtual machine is configured with two network interfaces: one NAT type for internet access, and one \textit{Host-only Adapter} type for internal communication between nodes. The cluster network layer is implemented using \textbf{Calico v3.28} \cite{calico_docs}, a CNI plugin that allows defining and effectively applying Network Policies, which is a requirement for one of the security policies implemented in the project.
+
+The choice of a local virtualised environment, rather than a cloud provider, responds to criteria of control and reproducibility. However, this decision has implications for the project scope, which are detailed at the end of this chapter.
+
+% ─────────────────────────────────────────────
+\section{Project phases}
+% ─────────────────────────────────────────────
+
+The project is organised into five sequential phases. Each phase has a defined scope and the next phase is not started until the previous one has been verified as functional.
+
+\subsection{Phase 1: Kubernetes cluster provisioning}
+
+The first phase encompasses the setup of the Kubernetes cluster on the two laboratory virtual machines. It includes the initialisation of the control node, the joining of the worker node and the installation of the Calico network plugin. The expected result is an operational cluster with both nodes active and all system components running.
+
+\subsection{Phase 2: Kyverno deployment and integration}
+
+The second phase introduces Kyverno as the security policy engine within the cluster. Kyverno is installed as a set of controllers that integrate with Kubernetes' Admission Controllers mechanism, intercepting requests to the API Server to apply the defined policies. This phase also includes the verification that Kyverno's webhooks are correctly registered and operational before proceeding with policy implementation.
+
+\subsection{Phase 3: Security policy implementation}
+
+The third phase constitutes the core of the work. A set of security policies covering the three types of actions available in Kyverno is designed and implemented: validation, mutation and generation. Policies are applied incrementally, starting with the simpler ones (validation of insecure configurations) and progressing towards the more complex ones (automatic manifest mutation and generation of derived resources).
+
+\subsection{Phase 4: GitOps integration with ArgoCD}
+
+Once the policies have been validated and are operational, the fourth phase introduces ArgoCD to manage the cluster state declaratively through a Git repository. All configurations --- Kyverno policies, test manifests and infrastructure configurations --- are stored in Git, and ArgoCD guarantees that the cluster state remains synchronised with the repository. This phase demonstrates the complete GitOps cycle: any change in the repository is automatically propagated to the cluster, and any manual deviation is detected and reverted.
+
+\subsection{Phase 5: CI/CD integration with GitHub Actions and Trivy}
+
+The fifth phase incorporates the continuous integration dimension into the DevSecOps environment. A pipeline is configured in GitHub Actions that automatically executes a vulnerability analysis on the container images used, employing Trivy as the scanning engine. This phase closes the complete DevSecOps cycle and additionally introduces the consideration of the risks of the pipeline's own supply chain, motivated by the supervisor's alert about the TeamPCP group attack, which compromised CI/CD pipelines through the manipulation of third-party actions and runners \cite{teampcp2026}.
+
+% ─────────────────────────────────────────────
+\section{Selection and scope of security policies}
+% ─────────────────────────────────────────────
+
+The set of policies implemented does not aim to exhaustively cover all existing security controls for Kubernetes. Following the supervisor's guidance, between five and ten policies have been selected that illustrate the different action mechanisms of Kyverno and correspond to real, well-documented security problems.
+
+The selected policies address the following risk categories:
+
+\begin{itemize}
+    \item Execution of containers as the root user
+    \item Privilege escalation at runtime
+    \item Use of images from unauthorised registries
+    \item Absence of resource limits (CPU and memory)
+    \item Insecure container security context configuration
+    \item Write access to the container filesystem
+    \item Access to the cloud instance metadata service (IP 169.254.169.254)
+\end{itemize}
+
+The last policy --- blocking access to the cloud metadata service --- was explicitly proposed by the supervisor as an illustrative example of Kyverno's generation mechanism. Through a \textit{generate} policy, Kyverno automatically creates a NetworkPolicy in each new cluster namespace that prevents access to that IP. If the NetworkPolicy is manually deleted, Kyverno regenerates it automatically, demonstrating the concept of protection against configuration deviations (\textit{drift protection}).
+
+Additionally, the supervisor pointed out the interest in incorporating image validation through digital signatures with tools such as Cosign or Notary, as well as the use of Kyverno's \texttt{imageRegistry} context to inspect image metadata. These functionalities are considered as a possible extension of the work if the available time permits, but do not form part of the committed scope.
+
+% ─────────────────────────────────────────────
+\section{System reporting and observability}
+% ─────────────────────────────────────────────
+
+The supervisor explicitly indicated that reporting is a relevant added value for the project. Kyverno automatically generates \texttt{PolicyReport} and \texttt{ClusterPolicyReport} resources that consolidate the results of policy evaluation over all cluster resources. These reports enable centrally knowing which resources comply with each policy, which have been automatically mutated and which have been rejected.
+
+The review and documentation of these reports forms part of the system validation plan and will be included as evidence in the results chapter. This mechanism provides an audit and compliance dimension that complements individual functional tests and demonstrates the applicability of the system in real environments where traceability of security evaluations is a requirement.
+
+% ─────────────────────────────────────────────
+\section{Validation strategy}
+% ─────────────────────────────────────────────
+
+System validation is carried out through controlled tests on the laboratory environment. For each policy implemented, at least one test scenario is executed that demonstrates its behaviour with direct documentary evidence: command outputs, system states and environment captures.
+
+Tests are organised into three categories:
+
+\begin{itemize}
+    \item \textbf{Blocking tests}: an attempt is made to deploy a resource that violates a validation policy and it is verified that the API Server rejects it with the corresponding error message.
+    \item \textbf{Mutation tests}: a resource with an incomplete or minimal configuration is deployed and it is verified that Kyverno has automatically applied the expected security fields, without the developer having had to specify them.
+    \item \textbf{Generation tests}: a namespace is created and both the automatic generation of the associated NetworkPolicy and its regeneration after manual deletion are verified, demonstrating the \textit{drift protection} mechanism.
+\end{itemize}
+
+Additionally, an integral test is executed that deploys a pod with minimal configuration and verifies that the set of active mutation policies transforms it into a pod with a complete security profile. This test constitutes the most representative demonstration of the central concept of the work: the \textit{auto-hardening} that is automatic and transparent to the developer.
+
+% ─────────────────────────────────────────────
+\section{Comparison with OPA Gatekeeper}
+% ─────────────────────────────────────────────
+
+The project includes a practical comparison between Kyverno and OPA Gatekeeper. To this end, a representative subset of the policies already defined in Kyverno will be reimplemented in OPA, with the objective of illustrating differences in syntax, capabilities and ease of use. The comparison does not seek to determine which tool is superior in absolute terms, but rather to evaluate which adapts better to the specific needs of an automated DevSecOps environment where mutation and generation of resources are key requirements.
+
+This practical exercise complements the theoretical comparison of Chapter~2 and allows drawing conclusions grounded in direct experience with both tools.
+
+% ─────────────────────────────────────────────
+\section{Scope decisions and anticipated limitations}
+% ─────────────────────────────────────────────
+
+Throughout the planning process, several explicit decisions have been made about the project scope that are worth documenting:
+
+\textbf{Sysdig Secure.} The supervisor warned that Sysdig Secure is a SaaS service that has historically presented integration issues with virtual machines, sometimes requiring cloud infrastructure to work correctly. Its integration is considered if viable with the laboratory environment, but it is accepted in advance that it may be necessary to document the limitation and replace it with an analysis of the runtime security capabilities the tool would offer in a real cloud environment.
+
+\textbf{Ansible.} Although there is interest in incorporating Ansible to automate cluster provisioning and component installation, the supervisor recommended addressing it only if the rest of the work is complete. Ansible is considered an optional extension that does not condition the main deliverable of the project.
+
+\textbf{Advanced image validation.} Digital signature verification functionalities (Cosign, Notary) and metadata inspection via \texttt{imageRegistry} remain outside the committed scope, although they will be included if time permits. Their absence does not affect the demonstration of the Policy-as-Code model, which is sufficiently covered by the main set of policies.
+
+These decisions reflect realistic planning aimed at guaranteeing a solid deliverable within the available time, rather than covering an excessive scope with the risk of remaining incomplete.

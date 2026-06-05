@@ -55,7 +55,7 @@ Además, en entornos reales es habitual encontrar configuraciones inseguras como
 \item Acceso no restringido a red
 \end{itemize}
 
-Estas prácticas suponen un riesgo elevado, especialmente en entornos multi-tenant.
+Estas prácticas suponen un riesgo elevado, especialmente en entornos \textit{multi-tenant} —donde múltiples equipos, aplicaciones o clientes comparten un mismo clúster Kubernetes con aislamiento lógico mediante namespaces—, ya que un compromiso en una carga de trabajo puede propagarse al resto si no existen controles adecuados de red, ejecución y privilegios.
 
 Esto justifica la necesidad de aplicar controles automáticos en el momento del despliegue mediante políticas de seguridad en Kubernetes.
 

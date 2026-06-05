@@ -1,0 +1,167 @@
+\documentclass[a4paper, twoside, 12pt, openright]{report}
+
+\usepackage{booktabs}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+
+\usepackage[english]{babel}
+\usepackage{fancyhdr}
+\usepackage{etoolbox}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{setspace}
+\usepackage{titlesec}
+\usepackage{newtxtext,newtxmath}
+\usepackage[nottoc, numbib]{tocbibind}
+\usepackage[nonumberlist, toc]{glossaries}
+\usepackage[style=ieee, backend=biber]{biblatex}
+\addbibresource{references.bib}
+
+\input{glossary_en.tex}
+
+\setglossarystyle{altlist}
+\setacronymstyle{long-short}
+
+\makeglossaries
+
+% ── Style for code blocks, commands and YAML manifests ────────────────────────
+\definecolor{codbg}{RGB}{247,247,247}
+\definecolor{codborder}{RGB}{210,210,210}
+\lstdefinestyle{tfmcode}{
+  backgroundcolor  = \color{codbg},
+  basicstyle       = \ttfamily\small,
+  breaklines       = true,
+  breakatwhitespace= false,
+  postbreak        = \mbox{{\footnotesize$\hookrightarrow$}\space},
+  frame            = single,
+  rulecolor        = \color{codborder},
+  framesep         = 5pt,
+  xleftmargin      = 8pt,
+  xrightmargin     = 8pt,
+  keepspaces       = true,
+  columns          = flexible,
+  showstringspaces = false,
+  tabsize          = 2,
+  aboveskip        = 4pt,
+  belowskip        = 4pt,
+  literate =
+    {á}{{\'{a}}}1 {é}{{\'{e}}}1 {í}{{\'{i}}}1 {ó}{{\'{o}}}1 {ú}{{\'{u}}}1
+    {Á}{{\'{A}}}1 {É}{{\'{E}}}1 {Í}{{\'{I}}}1 {Ó}{{\'{O}}}1 {Ú}{{\'{U}}}1
+    {ñ}{{\~{n}}}1 {Ñ}{{\~{N}}}1
+}
+\lstset{style=tfmcode}
+% ────────────────────────────────────────────────────────────────────────────
+
+\titleformat{\chapter}[block]{\normalfont\fontsize{18pt}{0pt}\bfseries}{\thechapter}{1em}{}
+\titlespacing*{\chapter}{0pt}{0pt}{\baselineskip}
+\titlespacing*{\section}{0pt}{1.5ex plus .2ex}{0.8ex}
+\titlespacing*{\subsection}{0pt}{1.5ex plus .2ex}{0.8ex}
+
+\titleformat{\section}[block]{\normalfont\fontsize{16pt}{0pt}\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}[block]{\normalfont\fontsize{14pt}{0pt}\bfseries}{\thesubsection}{1em}{}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    filecolor=magenta,
+    urlcolor=blue,
+    pdftitle={Master's Thesis},
+    pdfauthor={Ziad El Karrabi El Hanafi},
+    pdfpagemode=FullScreen
+}
+
+\geometry{top=3cm, bottom=2.54cm, left=2.54cm, right=2.54cm, bindingoffset=0.46cm}
+
+\setlength{\headheight}{14.5pt}
+
+\setlength{\parindent}{0pt}
+
+\graphicspath{{images/}}
+
+\fancypagestyle{plain}{
+    \fancyhf{}
+    \fancyhead[RO,LE]{\fontsize{10}{12}\textit{\thepage}}
+    \fancyhead[RE]{\fontsize{10}{12}\textit{Master's Thesis}}
+    \fancyfoot{}
+}
+\pagestyle{plain}
+
+\title{
+    \begin{center}
+        \begin{minipage}{0.45\linewidth}
+            \centering
+            \includegraphics[width=0.7\linewidth]{images/logo-tecnocampus.png}
+        \end{minipage}
+        \hfill
+        \begin{minipage}{0.45\linewidth}
+            \centering
+            \includegraphics[width=0.35\linewidth]{images/logo-udg.png}
+        \end{minipage}
+
+        \vspace{1.5cm}
+
+        {\fontsize{14pt}{0pt}\textbf{Applied Computer Security to Industrial Environments}} \\[1cm]
+
+        \textbf{Design and implementation of a DevSecOps architecture based on GitOps:}\\
+        \textbf{Supply chain security in Kubernetes using scanners, ArgoCD and Kyverno} \\[1.5cm]
+
+        \textbf{Master's Thesis} \\[5cm]
+    \end{center}
+}
+\author{
+\fontsize{14pt}{0pt}
+\textbf{Ziad El Karrabi El Hanafi} \\
+\textbf{Supervisor: Josep Andreu}
+}
+\date{2026}
+
+\fontsize{12pt}{0pt}
+\begin{document}
+
+\maketitle
+
+\newpage
+\thispagestyle{empty}
+\null
+\newpage
+
+\pagenumbering{Roman}
+
+\tableofcontents
+
+\listoffigures
+
+\listoftables
+
+\onehalfspacing
+\setlength{\parskip}{12pt}
+
+\fancypagestyle{plain}{
+    \fancyhf{}
+    \fancyhead[RO,LE]{\fontsize{10}{12}\textit{\thepage}}
+    \fancyhead[LO]{\fontsize{10}{12}\textit{\nouppercase{\textit{\leftmark}}}}
+    \fancyhead[RE]{\fontsize{10}{12}\textit{Master's Thesis}}
+    \fancyfoot{}
+}
+\pagestyle{plain}
+\pagenumbering{arabic}
+\input{chapters/01_introduction_en}
+\input{chapters/02_state_of_the_art_en}
+\input{chapters/03_objectives_en}
+\input{chapters/04_methodology_en}
+\input{chapters/05_architecture_en}
+\input{chapters/06_implementation_en}
+\input{chapters/07_argocd_en}
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Bibliography}
+\printbibliography
+\cleardoublepage
+\glsaddall
+\printglossary
+\end{document}

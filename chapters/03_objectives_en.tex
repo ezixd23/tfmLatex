@@ -1,0 +1,45 @@
+\chapter{Objectives and Scope}
+
+\section{General objective}
+
+The main objective of this Master's Thesis is the design and implementation of a functional DevSecOps environment on Kubernetes, integrating security mechanisms natively within the software development and deployment lifecycle.
+
+The core of the project focuses on applying the Policy-as-Code paradigm through the use of Admission Controllers, specifically Kyverno, with the objective of guaranteeing secure configurations at deployment time. Unlike traditional approaches based solely on detection or blocking, this work places special emphasis on the use of \textit{mutating} policies, capable of automatically correcting insecure configurations in Kubernetes manifests.
+
+This approach enables not only the prevention of configuration errors, but also the establishment of automatic hardening mechanisms aligned with modern security practices in cloud-native environments.
+
+\section{Specific objectives}
+
+To achieve the general objective, the following specific objectives are defined:
+
+\begin{itemize}
+    \item Deploy a functional Kubernetes cluster in a laboratory environment, with an architecture based on one control node and one worker node, properly configuring communication and the network layer via a CNI solution such as Calico.
+
+    \item Install and configure Kyverno as a Policy-as-Code security policy engine, integrating it as an Admission Controller within the cluster.
+
+    \item Define and implement a representative set of security policies (between 5 and 10), focused on real-world issues such as:
+    \begin{itemize}
+        \item containers running with elevated privileges,
+        \item privilege escalation,
+        \item absence of resource limits,
+        \item unrestricted network communication.
+    \end{itemize}
+
+    \item Validate policy behaviour through practical tests, demonstrating both the blocking of insecure configurations (\textit{validating policies}) and their automatic correction (\textit{mutating policies}).
+
+    \item Implement an advanced policy based on the automatic generation of Network Policies, with the objective of restricting access to sensitive resources, such as metadata services (for example, IP 169.254.169.254), common in cloud environments.
+
+    \item Integrate the cluster within a GitOps-based continuous deployment model, using ArgoCD to manage the declarative state of applications.
+
+    \item Incorporate a continuous integration pipeline via GitHub Actions, including build and vulnerability analysis processes with tools such as Trivy or Sysdig Secure.
+
+    \item Perform a technical comparison between Kyverno and OPA Gatekeeper, analysing differences in ease of use, validation and mutation capabilities, and suitability in production environments.
+\end{itemize}
+
+\section{Project scope}
+
+The project is developed in a laboratory environment based on virtual machines, with the objective of reproducing a realistic Kubernetes deployment scenario. The scope includes the cluster configuration, the integration of the main DevSecOps pipeline tools and the implementation of representative security policies.
+
+However, the work does not aim to cover all existing security standards exhaustively, but rather to demonstrate the functionality and viability of the Policy-as-Code model applied to Kubernetes through practical case studies.
+
+Additionally, the use of automation tools such as Ansible is considered a possible extension of the project. Following an iterative approach, priority is initially given to the implementation of security mechanisms and their validation, leaving the complete deployment automation as future or parallel work depending on available time.
