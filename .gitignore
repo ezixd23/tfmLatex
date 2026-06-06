@@ -1,3 +1,4 @@
+# General LaTeX compilation files
 *.aux
 *.log
 *.out
@@ -13,3 +14,11 @@
 *.fdb_latexmk
 *.fls
 *.ist
+
+# Temporary glossary and acronym archives
+*.glo
+*.glg
+*.gls
+*.acn
+*.acr
+*.alg
