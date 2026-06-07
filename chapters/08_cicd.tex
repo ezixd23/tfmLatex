@@ -1,0 +1,495 @@
+\chapter{Integración Continua con GitHub Actions y análisis de vulnerabilidades}
+
+El presente capítulo documenta la implementación del plano de Integración Continua del entorno DevSecOps, completando la arquitectura diseñada en el Capítulo~5 y cerrando el ciclo CI/CD iniciado con ArgoCD en el Capítulo~7. Hasta este punto, la arquitectura GitOps operaba con un único repositorio (\texttt{tfm-gitops}) que combinaba manifiestos de Kubernetes y políticas de seguridad, gestionado declarativamente por ArgoCD. El presente capítulo materializa el \textit{patrón de dos repositorios} anunciado en la Sección~7.1: se introduce un segundo repositorio (\texttt{tfm-demo-app}) que contiene el código fuente de la aplicación y su Dockerfile, y se implementa el pipeline de Integración Continua que construye la imagen, la somete a análisis de seguridad y propaga el cambio al repositorio GitOps para su despliegue automático.
+
+Una característica técnica central del pipeline es la adopción de una estrategia de \textit{defensa en profundidad} en el análisis de vulnerabilidades: en lugar de un único motor de escaneo, se implementan dos motores complementarios. Trivy \cite{trivy_docs} analiza la imagen construida localmente, y Grype \cite{grype_docs} analiza un SBOM (\textit{Software Bill of Materials}) \cite{syft_docs} generado por Syft sobre esa misma imagen, consultando bases de datos de CVEs distintas. El hallazgo empírico que justifica esta estrategia ---Trivy dejó pasar la imagen \texttt{python:3.12-slim} sin alertas mientras Grype detectó una vulnerabilidad HIGH que bloqueó el pipeline--- constituye uno de los resultados más relevantes del trabajo.
+
+El capítulo se organiza en siete secciones. La primera justifica la separación en dos repositorios y documenta su estructura. La segunda describe la configuración del registro de imágenes y las credenciales del pipeline. La tercera documenta la aplicación de demostración y sus Dockerfiles. La cuarta describe el diseño del workflow de GitHub Actions y sus decisiones de seguridad. La quinta analiza en profundidad la estrategia de doble motor de escaneo y el hallazgo empírico clave. La sexta recoge las incidencias técnicas y las lecciones aprendidas durante la implementación. La séptima documenta el cierre del ciclo CI/CD completo y la integración con el repositorio GitOps.
+
+% ─────────────────────────────────────────────
+\section{Diseño del repositorio de aplicación y estrategia de dos repositorios}
+% ─────────────────────────────────────────────
+
+La separación entre el repositorio de aplicación y el repositorio de configuración no responde a una preferencia organizativa, sino a un requisito de seguridad concreto justificado en la Sección~5.5.1. El principio central es la segregación de credenciales: el pipeline de CI necesita acceso al registro de imágenes (\texttt{quay.io}) y capacidad de escritura en el repositorio de configuración, pero en ningún caso debe tener acceso directo al clúster Kubernetes. ArgoCD, a su vez, necesita acceso al repositorio de configuración para sincronizar el estado del clúster, pero no tiene razón alguna para acceder al código fuente de la aplicación. Esta separación establece un perímetro de seguridad entre las dos fases del ciclo CI/CD, de modo que el compromiso de una de ellas no implica automáticamente el compromiso de la otra.
+
+El repositorio \texttt{tfm-demo-app} contiene exclusivamente los artefactos del plano de aplicación:
+
+\begin{itemize}
+  \item \texttt{app/}: código fuente de la aplicación Python Flask, incluyendo el módulo principal (\texttt{app.py}) y el fichero de dependencias (\texttt{requirements.txt}).
+  \item \texttt{docker/}: los dos Dockerfiles del proyecto (\texttt{Dockerfile} y \texttt{Dockerfilevulnerable}).
+  \item \texttt{.github/workflows/}: el workflow de GitHub Actions (\texttt{build-and-push.yaml}) que implementa el pipeline completo de CI.
+\end{itemize}
+
+El repositorio \texttt{tfm-gitops}, gestionado por ArgoCD desde el Capítulo~7, no es modificado por el equipo de desarrollo: únicamente el pipeline de CI lo actualiza, y únicamente en el campo \texttt{image} del manifiesto de la aplicación demo. Esta delimitación garantiza que los manifiestos de las políticas de seguridad (directorio \texttt{policies/}) y la configuración de las \texttt{Application} de ArgoCD permanecen bajo control estricto y separado del ciclo de desarrollo de la aplicación.
+
+Esta arquitectura materializa el flujo descrito en la Sección~5.3.1: el commit en el repositorio de aplicación dispara el pipeline de CI, que culmina con un commit en el repositorio de configuración, que a su vez actúa como señal de disparo para ArgoCD. El clúster nunca recibe instrucciones directas del pipeline: toda la interacción con Kubernetes está mediada por el repositorio GitOps y el controlador de reconciliación.
+
+% ─────────────────────────────────────────────
+\section{Configuración del registro de imágenes y credenciales}
+% ─────────────────────────────────────────────
+
+El registro de imágenes elegido es Quay.io \cite{quay_docs}, en coherencia con las herramientas presentadas en la asignatura y como alternativa de nivel empresarial a Docker Hub. La autenticación del pipeline contra el registro se realiza mediante un \textbf{Robot Account}, un concepto central en la gestión de credenciales para sistemas de CI/CD que merece una justificación técnica explícita.
+
+Un Robot Account es una cuenta de servicio no personal cuyas credenciales están desvinculadas de cualquier usuario individual. En un pipeline CI/CD, el uso de credenciales personales presenta dos problemas de seguridad: el primero es el \textit{blast radius} en caso de compromiso ---las credenciales personales tienen acceso a todos los repositorios del usuario---; el segundo es la continuidad operativa ---si el usuario abandona la organización, el pipeline deja de funcionar---. Un Robot Account aborda ambos problemas: tiene acceso exclusivamente a los repositorios que se le asignan explícitamente, con el nivel de permiso mínimo necesario para su función.
+
+El Robot Account creado se denomina \texttt{zelkarrabi+tfm\_ci\_robot}. La Figura~\ref{fig:ci-robotaccount} muestra su configuración de permisos en Quay.io: tiene permiso \textit{Write} (escritura) sobre el repositorio \texttt{tfm-demo-app} y permiso \textit{None} (sin acceso) sobre el repositorio \texttt{prova}, que es un repositorio de prueba no relacionado con el proyecto. Esta granularidad confirma la aplicación del principio de mínimo privilegio: el Robot Account solo puede publicar imágenes en el repositorio específico para el que ha sido creado, y no puede modificar su configuración ni acceder a otros repositorios.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{ci_cd/bloque1_robotaccount.png}
+\caption{Configuración del Robot Account \texttt{zelkarrabi+tfm\_ci\_robot} en Quay.io: permiso \textit{Write} sobre \texttt{tfm-demo-app} y sin acceso sobre otros repositorios}
+\label{fig:ci-robotaccount}
+\end{figure}
+
+La validación de las credenciales del Robot Account se realiza previamente mediante \texttt{podman login quay.io} desde el nodo de control del clúster, lo que confirma que las credenciales son funcionales antes de configurarlas en el pipeline. La Figura~\ref{fig:ci-podmanlogin} muestra la autenticación exitosa con el usuario \texttt{zelkarrabi}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.60\linewidth]{ci_cd/bloque1_podmanLogin.png}
+\caption{Verificación de credenciales del registro: autenticación exitosa en \texttt{quay.io} mediante \texttt{podman login}}
+\label{fig:ci-podmanlogin}
+\end{figure}
+\vspace{-\parskip}
+
+El pipeline requiere tres secretos de repositorio en GitHub, cuya configuración se muestra en la Figura~\ref{fig:ci-secrets}:
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{ci_cd/bloque2_creaccionSecrets.png}
+\caption{Los tres secretos de repositorio configurados en GitHub Actions: \texttt{GITOPS\_PAT}, \texttt{QUAY\_PASSWORD} y \texttt{QUAY\_USER}}
+\label{fig:ci-secrets}
+\end{figure}
+
+\begin{itemize}
+  \item \texttt{QUAY\_USER}: nombre del Robot Account (\texttt{zelkarrabi+tfm\_ci\_robot}) para la autenticación en Quay.io.
+  \item \texttt{QUAY\_PASSWORD}: token de acceso generado por Quay.io para el Robot Account.
+  \item \texttt{GITOPS\_PAT}: Personal Access Token de GitHub para la escritura cruzada en el repositorio \texttt{tfm-gitops}. A diferencia del Robot Account de Quay.io, un PAT clásico con scope \texttt{repo} no aplica el principio de mínimo privilegio: otorga acceso de lectura y escritura a \textit{todos} los repositorios del usuario, no solo a \texttt{tfm-gitops}. La alternativa correcta es un \textit{fine-grained PAT} limitado explícitamente a \texttt{tfm-gitops} con permiso \texttt{Contents: read/write}, que reproduce para GitHub la misma granularidad que el Robot Account ofrece en Quay.io; una \textit{deploy key} de repositorio es otra opción equivalente. En este entorno de laboratorio se utiliza un PAT clásico por simplicidad, siendo consciente de que en producción debería sustituirse por una de esas alternativas.
+\end{itemize}
+
+El uso explícito del \texttt{GITOPS\_PAT} en lugar del \texttt{GITHUB\_TOKEN} por defecto responde a una restricción técnica de GitHub Actions: el \texttt{GITHUB\_TOKEN} tiene permisos únicamente sobre el repositorio en el que se ejecuta el workflow (\texttt{tfm-demo-app}), y no puede escribir en un repositorio diferente. El \texttt{GITOPS\_PAT}, al ser un token personal con scope explícito sobre \texttt{tfm-gitops}, es el mecanismo correcto para la escritura cruzada entre repositorios.
+
+% ─────────────────────────────────────────────
+\section{La aplicación de demostración y los Dockerfiles}
+% ─────────────────────────────────────────────
+
+La aplicación de demostración es una aplicación Python Flask \cite{github_actions_docs} mínima cuya función es validar el ciclo CI/CD completo, no representar una carga de trabajo de producción real. Expone dos endpoints en el puerto~8080:
+
+\begin{lstlisting}
+from flask import Flask, jsonify
+import os, socket
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return jsonify({
+        "service": "tfm-demo-app",
+        "version": "1.0.0",
+        "status": "ok",
+        "hostname": socket.gethostname(),
+        "ci_pipeline": os.getenv("CI_PIPELINE", "manual")
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy"})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
+\end{lstlisting}
+
+El endpoint raíz (\texttt{/}) devuelve un objeto JSON que incluye el nombre del servicio, la versión, el hostname del pod y el valor de la variable de entorno \texttt{CI\_PIPELINE}. Este último campo es el que permite verificar empíricamente, al final del capítulo, que el código desplegado en el clúster corresponde exactamente al código del commit que disparó el pipeline. El endpoint \texttt{/health} sirve de sonda de disponibilidad para los componentes de Kubernetes.
+
+\subsection{El Dockerfile seguro: decisiones técnicas}
+
+El Dockerfile principal incorpora varias decisiones de diseño orientadas a la seguridad que merecen justificación explícita:
+
+\begin{lstlisting}
+# Stage 1: builder
+FROM python:3.13-slim AS builder
+WORKDIR /build
+COPY app/requirements.txt .
+RUN pip install --no-cache-dir --user --upgrade pip && \
+    pip install --no-cache-dir --user -r requirements.txt
+
+# Stage 2: runtime
+FROM python:3.13-slim
+RUN groupadd -r -g 10001 appuser && \
+    useradd -r -u 10001 -g appuser appuser
+
+WORKDIR /app
+COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
+COPY --chown=appuser:appuser app/app.py /app/
+
+ENV PATH="/home/appuser/.local/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER appuser
+EXPOSE 8080
+CMD ["python", "/app/app.py"]
+\end{lstlisting}
+
+\textbf{Multi-stage build.} La separación entre la fase \texttt{builder} y la fase de ejecución es la decisión de mayor impacto sobre la superficie de ataque de la imagen. La fase \texttt{builder} instala las dependencias con \texttt{pip install --user}, que las deposita en \texttt{/root/.local}. La imagen de ejecución copia únicamente ese directorio ---con \texttt{--chown=appuser:appuser}--- al directorio \texttt{/home/appuser/.local} del usuario de aplicación. De este modo, el binario \texttt{pip} y sus propias dependencias transitivas no están presentes en el artefacto final, reduciendo el número de componentes escaneables y la superficie de explotación en tiempo de ejecución.
+
+\textbf{Imagen base mínima (\texttt{python:3.13-slim}).} La variante \texttt{slim} de la imagen oficial de Python elimina los paquetes del sistema operativo no esenciales que incluye la imagen estándar. Esta elección representa un punto de equilibrio entre compatibilidad y seguridad: la imagen incluye las bibliotecas de sistema necesarias para la mayoría de aplicaciones Python, pero elimina herramientas de desarrollo, intérpretes de scripting y utilidades que podrían ser aprovechadas tras una intrusión. El extremo de esta estrategia son las imágenes \textit{distroless} \cite{distroless_docs} de Google, que eliminan incluso el shell y el gestor de paquetes, reduciendo la superficie de ataque al mínimo absoluto a costa de cierta complejidad en el diagnóstico de fallos en tiempo de ejecución.
+
+\textbf{Usuario no root con UID~10001.} El Dockerfile crea \texttt{appuser} como cuenta de sistema (\texttt{groupadd -r}, \texttt{useradd -r}): sin shell de login, sin entrada en \texttt{/etc/passwd} con home explícito, con UID~10001 que evita colisiones con UIDs de sistema (0--999) y de usuario típicos (1000+). La instrucción \texttt{USER appuser} hace efectiva esa identidad para todos los procesos del contenedor. Esto constituye una capa de defensa en profundidad coherente con la política P1 (\texttt{disallow-root}) del capítulo~6: aunque Kyverno rechazaría cualquier pod sin \texttt{runAsNonRoot:\,true}, la defensa empieza antes, en el propio Dockerfile, de modo que la imagen opere con mínimo privilegio independientemente del clúster en que se despliegue.
+
+\textbf{Variables de entorno de Python.} \texttt{PYTHONUNBUFFERED=1} garantiza que la salida estándar del proceso no es almacenada en buffer, lo que permite que los logs sean capturados en tiempo real por el sistema de logging de Kubernetes. \texttt{PYTHONDONTWRITEBYTECODE=1} evita la escritura de ficheros \texttt{.pyc} en el sistema de ficheros del contenedor, lo que es coherente con la política P6 (\texttt{add-readonly-rootfs}) que fuerza el sistema de ficheros raíz a modo de solo lectura: sin esta variable, Python intentaría escribir bytecode compilado y generaría errores de permisos en tiempo de ejecución.
+
+\textbf{Flag \texttt{-{}-no-cache-dir}.} La instalación de dependencias con esta opción evita que pip almacene el caché de paquetes descargados dentro de la imagen, reduciendo su tamaño final y eliminando contenido innecesario que podría contener versiones desactualizadas de paquetes.
+
+\subsection{El Dockerfile vulnerable como artefacto de referencia}
+
+El repositorio incluye un segundo Dockerfile, \texttt{Dockerfilevulnerable}, basado en \texttt{python:3.4-alpine}. Python~3.4 alcanzó su fin de vida en marzo de 2019 y acumula cientos de CVEs documentadas sin corrección disponible en esa rama. Este artefacto fue diseñado originalmente como mecanismo de prueba controlada para demostrar el escenario de bloqueo del pipeline ante imágenes con vulnerabilidades críticas. Sin embargo, como se documenta en la Sección~8.6, este escenario artificial resultó innecesario: el propio ciclo de desarrollo produjo de forma orgánica un bloqueo genuino que constituye evidencia empírica de mayor valor académico que cualquier prueba artificial.
+
+% ─────────────────────────────────────────────
+\section{Diseño del pipeline de Integración Continua}
+\label{sec:pipeline-design}
+% ─────────────────────────────────────────────
+
+El pipeline se define en el fichero \texttt{.github/workflows/build-and-push.yaml}. El nombre del workflow es \textit{Build, Scan and Push to Quay} y su job único se denomina \textit{Build, Trivy scan and push}. El disparador es \texttt{push} sobre la rama \texttt{main} con filtros de path que limitan la ejecución a commits que afectan al directorio \texttt{app/}, al directorio \texttt{docker/} o al propio fichero de workflow:
+
+\begin{lstlisting}
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'docker/**'
+      - '.github/workflows/**'
+\end{lstlisting}
+
+Esta configuración evita que commits que afecten únicamente a documentación o ficheros auxiliares disparen innecesariamente el pipeline, reduciendo el consumo de minutos de GitHub Actions y el ruido en el historial de ejecuciones.
+
+\subsection{Decisiones de seguridad del pipeline}
+
+Las cuatro decisiones de diseño de seguridad del pipeline merecen justificación técnica explícita, dado que materializan directamente los principios enunciados en el Capítulo~5.
+
+\textbf{Anclaje de versiones mediante hash SHA.} Todas las GitHub Actions de terceros utilizadas en el pipeline se referencian mediante el hash SHA completo de su commit, en lugar de mediante etiquetas de versión semántica o etiquetas flotantes como \texttt{@v4} o \texttt{@latest}. Por ejemplo:
+
+\begin{lstlisting}
+- uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+\end{lstlisting}
+
+Esta práctica materializa la defensa frente al vector de ataque documentado en la Sección~5.5.6: una etiqueta como \texttt{@v4} puede ser redirigida por el mantenedor de la action (o por un atacante que haya comprometido su cuenta) a un commit diferente sin que el nombre de la referencia cambie. Un hash SHA, en cambio, es inmutable: si el manifiesto del workflow referencia el SHA \texttt{b4ffde65f46\ldots}, el runner ejecutará exactamente ese commit, independientemente de lo que ocurra con las etiquetas del repositorio. La limitación de este mecanismo, que se documenta como incidencia en la Sección~8.6, es que no protege frente a dependencias transitivas del propio código de la action.
+
+\textbf{Permisos mínimos del runner.} El bloque de permisos del job declara explícitamente solo los permisos necesarios:
+
+\begin{lstlisting}
+permissions:
+  contents: read
+\end{lstlisting}
+
+El \texttt{GITHUB\_TOKEN} por defecto en GitHub Actions tiene permisos de escritura sobre el repositorio. Esta declaración explícita de \texttt{contents: read} revoca esos permisos por defecto, de modo que incluso si el entorno del runner fuera comprometido durante la ejecución, el token exfiltrado no podría modificar el repositorio de la aplicación.
+
+\textbf{Etiqueta de imagen basada en el SHA corto del commit.} La etiqueta de la imagen publicada en Quay.io se computa a partir del SHA corto del commit que disparó el pipeline:
+
+\begin{lstlisting}
+- name: Compute image tag
+  id: vars
+  run: |
+    SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+    echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_OUTPUT
+    echo "FULL_IMAGE=${REGISTRY}/${IMAGE_NAME}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+\end{lstlisting}
+
+Esta decisión implementa el principio de trazabilidad e inmutabilidad de la cadena de suministro: cada imagen publicada en el registro corresponde biunívocamente a un commit concreto del repositorio de aplicación, permitiendo auditar en cualquier momento qué código exacto está en ejecución en el clúster. Este diseño es además coherente con la política P9 (\texttt{disallow-latest-tag}) introducida en la Sección~7.5.2, que rechaza pods cuyas imágenes estén etiquetadas con \texttt{:latest}: el pipeline nunca produce etiquetas flotantes, solo etiquetas basadas en commit SHA.
+
+\textbf{Separación de build y push.} La imagen se construye localmente en el runner sin ser publicada (\texttt{push: false}). El escaneo de vulnerabilidades se ejecuta sobre la imagen construida localmente. Solo si todos los controles de seguridad superan sus umbrales se ejecuta el paso de publicación. Esta secuencia es la implementación del principio de \textit{fail fast}: una imagen vulnerable nunca llega al registro, eliminando el riesgo de que ArgoCD la detecte y la despliegue antes de que el incidente sea identificado y gestionado.
+
+\subsection{Secuencia completa de pasos del pipeline}
+
+La Figura~\ref{fig:ci-workflow-steps-final} muestra la vista de pasos del workflow completo en su versión final, con los 15 pasos que forman el pipeline en estado de éxito:
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.70\linewidth]{ci_cd/bloque5_WorkflowCompleto.png}
+\caption{Pipeline \textit{Build, Trivy scan and push} completo: los 15 pasos del ciclo CI/CD, ejecutado en 1~min~7~s}
+\label{fig:ci-workflow-steps-final}
+\end{figure}
+
+La secuencia de pasos es la siguiente:
+
+\begin{enumerate}
+  \item \textbf{Set up job}: inicialización del runner \texttt{ubuntu-latest} y descarga de las actions referenciadas por SHA.
+  \item \textbf{Checkout source}: clonado del repositorio \texttt{tfm-demo-app} mediante \texttt{actions/checkout} anclado por SHA.
+  \item \textbf{Compute image tag}: cómputo de la etiqueta de imagen a partir de los primeros 7 caracteres del SHA del commit (\texttt{GITHUB\_SHA | cut -c1-7}), exportado como outputs \texttt{SHORT\_SHA} y \texttt{FULL\_IMAGE}.
+  \item \textbf{Login to Quay.io}: autenticación en \texttt{quay.io} con las credenciales del Robot Account almacenadas en los secretos \texttt{QUAY\_USER} y \texttt{QUAY\_PASSWORD}.
+  \item \textbf{Build Docker image}: construcción de la imagen mediante \texttt{docker/build-push-action} con \texttt{push:\,false}, produciendo la imagen en el daemon local del runner sin publicarla.
+  \item \textbf{Trivy vulnerability scan}: escaneo de la imagen local con Trivy, configurado para fallar el pipeline ante vulnerabilidades de severidad \texttt{HIGH} o \texttt{CRITICAL} (\texttt{ignore-unfixed: true}).
+  \item \textbf{Generate SBOM with Syft}: generación del Software Bill of Materials en formato CycloneDX mediante Syft \cite{syft_docs}, produciendo el fichero \texttt{sbom.cyclonedx.json}.
+  \item \textbf{Upload SBOM artifact}: subida del SBOM como artefacto del workflow, accesible desde la interfaz de GitHub Actions y descargable para auditoría posterior.
+  \item \textbf{Vulnerability scan with Grype}: análisis del SBOM CycloneDX con Grype \cite{grype_docs}, configurado para fallar ante vulnerabilidades de severidad \texttt{HIGH} o superior con corrección disponible (\texttt{--only-fixed}).
+  \item \textbf{Push image to Quay}: publicación condicional de la imagen en el registro. Solo se ejecuta si todos los pasos de escaneo anteriores han tenido éxito.
+  \item \textbf{Checkout GitOps repository}: clonado del repositorio \texttt{tfm-gitops} usando el \texttt{GITOPS\_PAT}.
+  \item \textbf{Install yq}: instalación de \texttt{yq}, procesador YAML de línea de comandos.
+  \item \textbf{Update image tag in GitOps repo}: actualización del campo \texttt{image} en el manifiesto \texttt{deployment.yaml} de la aplicación demo.
+  \item \textbf{Commit and push to GitOps repo}: commit y push del manifiesto actualizado al repositorio GitOps.
+  \item \textbf{Final summary}: resumen de la ejecución.
+\end{enumerate}
+
+La primera versión operativa del pipeline contenía únicamente los pasos 1--6 y 10 (Trivy como único motor de escaneo, sin SBOM ni Grype y sin el cierre del ciclo GitOps). La Figura~\ref{fig:ci-workflow-steps-inicial} documenta esta versión inicial, con 50~s de ejecución, que sirvió como base para validar la integración con Quay.io antes de añadir la capa de análisis SBOM.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{ci_cd/bloque3_workflowSteps.png}
+\caption{Versión inicial del pipeline \textit{Build, Trivy scan and push} (sin SBOM ni Grype): pasos de construcción, escaneo Trivy y publicación, completado en 50~s}
+\label{fig:ci-workflow-steps-inicial}
+\end{figure}
+
+La primera ejecución exitosa de este pipeline publicó en Quay.io la imagen con la etiqueta \texttt{4888886} (SHA corto del commit), visible en la Figura~\ref{fig:ci-primer-tag}. Quay.io muestra para esta imagen un resultado de 8 vulnerabilidades de severidad media y 10 corregibles, con un tamaño de 47.2~MiB y el SHA256 del manifiesto \texttt{3564a6559cbc}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{ci_cd/bloque3_creaccionTag.png}
+\caption{Primera imagen publicada en el repositorio \texttt{zelkarrabi/tfm-demo-app} de Quay.io: etiqueta \texttt{4888886} basada en el SHA corto del commit (47.2~MiB)}
+\label{fig:ci-primer-tag}
+\end{figure}
+
+% ─────────────────────────────────────────────
+\section{Análisis de vulnerabilidades: defensa en profundidad con Trivy y Grype}
+\label{sec:vuln-analysis}
+% ─────────────────────────────────────────────
+
+La incorporación de un segundo motor de análisis de vulnerabilidades no es una decisión de redundancia, sino de complementariedad técnica. Para comprender por qué dos motores son más seguros que uno, es necesario entender las diferencias estructurales entre sus metodologías de análisis y sus fuentes de datos.
+
+\subsection{Arquitecturas de escaneo complementarias}
+
+\textbf{Trivy} \cite{trivy_docs} analiza la imagen directamente, inspeccionando sus capas y extrayendo los paquetes instalados para contrastarlos con su base de datos curada, compuesta por fuentes de Aqua Security y los repositorios de datos de seguridad de las distribuciones Linux (Red Hat Security Advisories, Debian Security Tracker, Alpine SecDB, entre otros). Su fortaleza reside en la cobertura de paquetes del sistema operativo y en la rapidez de su base de datos, que se actualiza con alta frecuencia.
+
+\textbf{Syft + Grype} opera en dos fases. Syft \cite{syft_docs} genera un SBOM de la imagen, que es un inventario estructurado y estandarizado de todos los componentes del artefacto (paquetes del sistema operativo, bibliotecas de lenguaje, binarios). Grype \cite{grype_docs} analiza ese SBOM contra su propia base de datos, que agrega fuentes distintas a las de Trivy: Anchore Enterprise Data, GitHub Security Advisories, National Vulnerability Database (NVD) y fuentes específicas de Python como PyPI Advisory Database. Esta diferencia en las fuentes de datos hace que Grype pueda detectar vulnerabilidades que Trivy no ha incorporado aún en su base de datos, y viceversa.
+
+\subsection{El SBOM como entregable de compliance}
+
+La generación del SBOM mediante Syft no es únicamente un paso intermedio para el análisis con Grype: el fichero producido es un artefacto de \textit{compliance} y trazabilidad con valor propio. Un SBOM documenta, en un formato estructurado y estandarizado, qué componentes forman parte de cada artefacto, con sus versiones exactas y sus licencias. Este inventario permite responder a preguntas de auditoría como: ¿qué versión de \texttt{urllib3} está en producción?, ¿qué artefactos contienen una biblioteca afectada por una CVE recién publicada?
+
+Existen dos estándares principales para la especificación de SBOMs:
+
+\begin{itemize}
+  \item \textbf{SPDX} \cite{spdx_spec}: estándar de la Linux Foundation, orientado principalmente a la gestión de licencias de software y al cumplimiento de los requisitos de la cadena de suministro de software del NIST SSDF \cite{nist_ssdf}.
+  \item \textbf{CycloneDX} \cite{cyclonedx_spec}: estándar de la OWASP Foundation, orientado específicamente a la seguridad y al ciclo de vida DevSecOps, con soporte nativo para análisis de vulnerabilidades y metadatos de riesgo.
+\end{itemize}
+
+El pipeline emite el SBOM en formato \textbf{CycloneDX} (\texttt{-o cyclonedx-json}), el estándar de OWASP orientado a DevSecOps, que Grype consume directamente. El artefacto generado (\texttt{sbom.cyclonedx.json}) se sube al workflow bajo el nombre \texttt{sbom-\$\{SHORT\_SHA\}}, asociándolo al run concreto y a la imagen correspondiente. La Figura~\ref{fig:ci-sbom-upload} muestra la ejecución exitosa del paso \textit{Upload SBOM artifact}: el fichero \texttt{sbom-defe4ef.zip} fue subido con un tamaño final de 490.279~bytes (ID de artefacto \texttt{7196257107}), accesible en la URL de artefactos del workflow \cite{syft_docs}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ci_cd/bloque4_ArtefactoSBOM.png}
+\caption{Paso \textit{Upload SBOM artifact}: subida del SBOM \texttt{sbom-defe4ef.zip} como artefacto de auditoría (490.279~bytes, ID~\texttt{7196257107})}
+\label{fig:ci-sbom-upload}
+\end{figure}
+
+\subsection{Hallazgo empírico: CVE no detectada por Trivy, bloqueante para Grype}
+
+El hallazgo empírico más relevante del capítulo se produjo durante la primera ejecución del pipeline con el doble motor de escaneo activo, utilizando la imagen base \texttt{python:3.12-slim}. Trivy completó su escaneo sin reportar vulnerabilidades por encima del umbral de severidad configurado, y el paso avanzó correctamente. Grype, sin embargo, analizó el SBOM generado por Syft y detectó la vulnerabilidad \textbf{CVE-2025-13836} con severidad \textbf{HIGH} en el binario de Python~3.12.13, con versiones de corrección disponibles a partir de \texttt{3.13.11}, \texttt{3.14.1} y \texttt{3.15.0}. El pipeline falló con código de salida~1 en el paso \textit{Vulnerability scan with Grype}, impidiendo la publicación de la imagen.
+
+La Figura~\ref{fig:ci-grype-output} muestra la salida completa del paso fallido: además de CVE-2025-13836 (HIGH), Grype reportó múltiples vulnerabilidades de severidad MEDIUM en el binario de Python~3.12.13 (CVE-2026-2297, CVE-2026-1299, CVE-2026-0865, CVE-2025-6075, entre otras) y en las dependencias de Python instaladas (\texttt{flask~3.0.3}, \texttt{pip~25.0.1}, \texttt{werkzeug~3.0.4}). La línea de cierre del log, \texttt{Error: Process completed with exit code 1}, confirma que el pipeline se detuvo en este punto, sin ejecutar los pasos de publicación ni de actualización del repositorio GitOps.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ci_cd/bloque4_outputTrivyHighPython.png}
+\caption{Salida del paso \textit{Vulnerability scan with Grype} (\texttt{anchore/grype:v0.79.6}): bloqueo del pipeline por CVE-2025-13836 (HIGH) en \texttt{python~3.12.13}, con versiones de corrección desde \texttt{3.13.11}}
+\label{fig:ci-grype-output}
+\end{figure}
+
+Este comportamiento no es un fallo de ninguna de las dos herramientas. Trivy y Grype tienen bases de datos diferentes, taxonomías de severidad distintas y velocidades de incorporación de nuevos CVEs independientes. CVE-2025-13836 estaba presente en la base de datos de Grype en el momento de la ejecución pero no en la de Trivy. Este desfase temporal entre bases de datos es un fenómeno conocido y documentado en la literatura de seguridad de contenedores \cite{nist_sp800190}: las organizaciones que dependen de un único motor de escaneo asumen implícitamente que ese motor tiene cobertura completa de todos los CVEs relevantes, una suposición que este experimento refuta empíricamente.
+
+La conclusión es precisamente la inversa: la diversidad de motores de análisis aporta capas reales de seguridad porque cada motor puede detectar CVEs que los demás no han incorporado aún. El principio de defensa en profundidad, aplicado habitualmente en el plano de controles de acceso y configuración del clúster (Kyverno como motor de admisión, ArgoCD como controlador de estado declarativo), se aplica aquí al plano de la cadena de suministro de imágenes: ningún motor de escaneo es suficiente por sí solo.
+
+Conviene, sin embargo, acotar el alcance del hallazgo. El escaneo en CI es \textit{point-in-time}: solo detecta vulnerabilidades presentes en las bases de datos en el momento del build; una CVE publicada después de que la imagen se haya construido y publicado pasará desapercibida hasta el siguiente ciclo. Esto hace indispensable el re-escaneo periódico de imágenes ya publicadas y la monitorización en tiempo de ejecución ---función que en la arquitectura del Capítulo~5 corresponde a Sysdig. Adicionalmente, la conclusión de defensa en profundidad se apoya en un único caso empírico en el que los motores empleaban taxonomías de severidad distintas; en escenarios donde ambas taxonomías estén alineadas, la diferencia de cobertura entre motores podría ser menor.
+
+% ─────────────────────────────────────────────
+\section{Incidencias técnicas y lecciones aprendidas}
+% ─────────────────────────────────────────────
+
+Esta sección documenta las tres incidencias técnicas más relevantes surgidas durante la implementación del pipeline. Al igual que las secciones de lecciones aprendidas de los capítulos~6 y~7, el objetivo no es narrar fallos, sino extraer conclusiones técnicas de valor que ilustran principios generales del diseño de sistemas CI/CD seguros.
+
+\subsection{Incidencia 1: ataque de cadena de suministro en la propia action de Trivy}
+
+La primera incidencia afectó al propio mecanismo de defensa diseñado para proteger el pipeline de ataques de cadena de suministro: el anclaje de versiones de actions por SHA. Pese a referenciar \texttt{aquasecurity/trivy-action} mediante su hash SHA completo, el pipeline falló en el primer intento de ejecución con un error de resolución de la action.
+
+La causa raíz, identificada tras analizar los logs del runner, fue que \texttt{aquasecurity/trivy-action} tiene una dependencia transitiva interna hacia una action auxiliar denominada \texttt{setup-trivy}, referenciada mediante una etiqueta mutable (no fijada por SHA). Aqua Security había eliminado o reubicado esta etiqueta como parte de una respuesta a un incidente de seguridad en su propia infraestructura, lo que rompió la cadena de resolución de la action pese a que el SHA de la action principal permanecía intacto.
+
+La Figura~\ref{fig:ci-workflow-inicial} muestra el historial de las dos primeras ejecuciones del workflow: la primera (\textit{feat: initial application code, Dockerfiles and CI workflow}, commit \texttt{6070383}) falló en 7~s por este motivo; la segunda (\textit{ci: update trivy-action SHA to fix broken transitive dependency}, commit \texttt{4888886}) tuvo éxito en 52~s tras actualizar al SHA correspondiente a la versión estable \texttt{v0.35.0}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ci_cd/bloque3_workflowActions.png}
+\caption{Historial inicial del workflow: fallo del run~\#1 (7~s) por dependencia transitiva rota en la \textit{action} de Trivy, y corrección en el run~\#2 (52~s) con el SHA de \texttt{v0.35.0}}
+\label{fig:ci-workflow-inicial}
+\end{figure}
+
+Esta incidencia demuestra empíricamente una limitación real de la seguridad de la cadena de suministro en sistemas de CI basados en componentes de terceros: el anclaje por SHA protege únicamente frente a la mutación del código de la action referenciada directamente, pero no frente a las dependencias transitivas que esa action pueda resolver internamente mediante etiquetas mutables. En un entorno de producción, la mitigación completa requeriría o bien que los proveedores de actions anclen también sus dependencias internas por SHA, o bien el uso de un sistema de \textit{vendoring} que internalice todas las dependencias en el repositorio corporativo. La solución pragmática adoptada ---actualización al SHA de la versión estable con soporte activo--- es un compromiso aceptable que restaura la inmutabilidad del pipeline para la versión más reciente de la action.
+
+\subsection{Incidencia 2: reproducibilidad frente a frescura en la base de datos de Grype}
+
+La segunda incidencia afectó al paso \textit{Vulnerability scan with Grype} tras la incorporación del SBOM. Al fijar la versión de la imagen de Grype como \texttt{anchore/grype:v0.79.6}, la base de datos de vulnerabilidades incluida en esa imagen era estática y databa de la fecha de publicación de la imagen. Por defecto, Grype valida que su base de datos de CVEs no tenga más de 5~días de antigüedad; si el umbral se supera, Grype falla con un error antes de procesar el SBOM.
+
+Este comportamiento expone un \textit{trade-off} fundamental en el diseño de pipelines de seguridad: la \textbf{reproducibilidad} (versión fijada de la imagen, comportamiento determinístico del pipeline) entra en conflicto con la \textbf{frescura} (base de datos de CVEs actualizada, cobertura de las vulnerabilidades más recientes). Priorizar la reproducibilidad implica que el pipeline usará siempre la misma versión de Grype con la misma base de datos, pero esa base de datos se vuelve obsoleta con el tiempo. Priorizar la frescura implica que la imagen de Grype se actualiza automáticamente, pero introduce variabilidad en el comportamiento del pipeline (una ejecución puede fallar no porque la imagen tenga nuevas vulnerabilidades, sino porque la base de datos actualizada incorpora nuevas entradas).
+
+La solución adoptada fue configurar la variable de entorno \texttt{GRYPE\_DB\_VALIDATE\_AGE=false}, que instruye a Grype para que omita la validación de antigüedad y utilice la base de datos disponible en la imagen fijada:
+
+\begin{lstlisting}
+- name: Vulnerability scan with Grype
+  run: |
+    docker run --rm \
+      -e GRYPE_DB_VALIDATE_AGE=false \
+      -v "$PWD":/work \
+      anchore/grype:v0.79.6 \
+      sbom:/work/sbom.cyclonedx.json \
+      --fail-on high \
+      --only-fixed
+\end{lstlisting}
+
+Esta decisión prioriza el determinismo del pipeline: el mismo workflow con los mismos inputs producirá siempre el mismo comportamiento, facilitando la depuración de incidencias y la reproducción de resultados. En un entorno productivo, la alternativa recomendada sería una renovación controlada y periódica de la versión de la imagen de Grype mediante un proceso de actualización gestionado (pull request automático semanal, por ejemplo), que combina la actualización de la base de datos con una revisión explícita antes de ser incorporada al pipeline.
+
+La Figura~\ref{fig:ci-workflow-sbom-iteraciones} documenta el historial completo de ejecuciones del workflow durante la resolución de esta incidencia: los runs \#3, \#4 y \#5 corresponden a los intentos de resolución del problema de la base de datos de Grype, hasta alcanzar la solución estable con \texttt{GRYPE\_DB\_VALIDATE\_AGE=false} en el run \#6.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ci_cd/bloque4_flujoWorkflowAlIncluirSBOMGrype.png}
+\caption{Historial del workflow \textit{Build, Scan and Push to Quay}: iteraciones de resolución de incidencias con SBOM y Grype (runs \#3--\#5 fallidos) y ejecución final exitosa con \texttt{python:3.13-slim} (run \#6, commit \texttt{defe4ef})}
+\label{fig:ci-workflow-sbom-iteraciones}
+\end{figure}
+
+\subsection{Incidencia 3: aplicación del principio Shift-Left ante CVE-2025-13836}
+
+La tercera incidencia es, en términos de valor académico, la más representativa del capítulo: el pipeline bloqueó la publicación de la imagen \texttt{python:3.12-slim} por la CVE-2025-13836 (HIGH) detectada por Grype, tal como se documentó en la Sección~\ref{sec:vuln-analysis}. Ante este bloqueo, existían dos vías de respuesta:
+
+\begin{enumerate}
+  \item Reducir el umbral de severidad de Grype de \texttt{HIGH} a \texttt{CRITICAL}, de modo que CVE-2025-13836 no bloqueara el pipeline.
+  \item Corregir la vulnerabilidad en el origen actualizando la imagen base a una versión de Python que no contenga el CVE.
+\end{enumerate}
+
+La primera opción fue evaluada y descartada porque comprometería los estándares de seguridad del sistema: una vulnerabilidad de severidad HIGH en el runtime de Python no es un falso positivo ni un riesgo aceptable en el contexto de un entorno DevSecOps, y relajar el umbral de detección equivaldría a ignorar sistemáticamente toda vulnerabilidad que no alcance criticidad máxima. La segunda opción, actualizar la imagen base a \texttt{python:3.13-slim}, resuelve el problema en el origen sin comprometer ningún control.
+
+Esta decisión ejemplifica el principio \textit{Shift-Left} \cite{sharma2020devsecops}: en lugar de gestionar la vulnerabilidad en el plano del despliegue (añadiendo excepciones o relajando controles), se corrige en la fase más temprana posible del ciclo de vida ---la selección de la imagen base del Dockerfile. El pipeline no es solo un detector de vulnerabilidades; es un mecanismo que impone una obligación de corrección en el origen antes de que el artefacto avance en la cadena.
+
+La corrección se realizó mediante el commit \texttt{defe4ef} (\textit{fix: bump base image to python:3.13-slim to remediate High vulnerability}). La imagen resultante, publicada en Quay.io bajo la misma etiqueta, tiene 7~vulnerabilidades de severidad media y 8~corregibles con un tamaño de 46.9~MiB --- una reducción tanto en el número de CVEs como en el tamaño de la imagen, resultado esperado al usar una versión más moderna y parcheada de Python.
+
+\textbf{Nota sobre el Dockerfilevulnerable.} El escenario de bloqueo que el \texttt{Dockerfilevulnerable} (basado en \texttt{python:3.4-alpine}) habría permitido reproducir de forma artificial resultó innecesario: el propio pipeline de desarrollo produjo una prueba contrastada genuina al bloquear legítimamente una imagen que el equipo consideraba segura en ese momento (\texttt{python:3.12-slim}). Esta prueba real tiene mayor valor académico que una artificial porque demuestra el sistema funcionando en un escenario de producción donde las vulnerabilidades emergen sin previo aviso: ni el desarrollador eligió deliberadamente una imagen insegura, ni el bloqueo fue preparado. La CVE estaba presente en la base de datos de Grype, la imagen la contenía, y el pipeline hizo exactamente lo que fue diseñado para hacer.
+
+% ─────────────────────────────────────────────
+\section{Cierre del ciclo CI/CD: integración con el repositorio GitOps}
+% ─────────────────────────────────────────────
+
+El último bloque del pipeline cierra el ciclo CI/CD conectando el plano de Integración Continua documentado en este capítulo con el plano de Despliegue Continuo implementado en el Capítulo~7. Una vez superados todos los controles de seguridad y publicada la imagen en Quay.io, el pipeline actualiza el repositorio GitOps de forma automática.
+
+\subsection{Actualización automática del repositorio GitOps}
+
+El proceso de actualización se realiza en cuatro pasos consecutivos del workflow:
+
+\textbf{Checkout GitOps repository.} El pipeline hace checkout del repositorio \texttt{tfm-gitops} usando el \texttt{GITOPS\_PAT}:
+
+\begin{lstlisting}
+- name: Checkout GitOps repository
+  uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+  with:
+    repository: ezixd23/tfm-gitops
+    token: ${{ secrets.GITOPS_PAT }}
+    path: gitops-repo
+    ref: main
+\end{lstlisting}
+
+El uso del \texttt{GITOPS\_PAT} en lugar del \texttt{GITHUB\_TOKEN} por defecto es una decisión técnica justificada: el \texttt{GITHUB\_TOKEN} tiene permisos únicamente sobre el repositorio en el que se ejecuta el workflow (\texttt{tfm-demo-app}) y no puede escribir en un repositorio diferente. El \texttt{GITOPS\_PAT} es el mecanismo necesario para la escritura cruzada; en producción debería ser un fine-grained PAT limitado a \texttt{tfm-gitops} con \texttt{Contents: read/write}, tal como se razona en la Sección~8.2.
+
+\textbf{Install yq.} Se instala \texttt{yq}, el procesador YAML de línea de comandos de Mike Farah, que permite modificar campos específicos de un fichero YAML sin alterar la estructura del resto del fichero.
+
+La elección de \texttt{yq} frente a alternativas como \texttt{sed} responde a consideraciones de robustez. \texttt{sed} opera sobre texto plano sin comprensión de la estructura YAML: un cambio de formato en el fichero (espaciado diferente, comentarios, reordenación de campos) puede romper la expresión regular de sustitución silenciosamente, produciendo un manifiesto malformado. \texttt{yq}, al procesar el YAML como un árbol de datos estructurado, garantiza que únicamente el campo \texttt{image} del primer contenedor del Deployment es modificado, preservando el resto del fichero sin cambios.
+
+\textbf{Update image tag in GitOps repo.} La actualización del manifiesto se realiza con una expresión \texttt{yq} que navega la estructura del Deployment:
+
+\begin{lstlisting}
+- name: Update image tag in GitOps repo
+  run: |
+    cd gitops-repo
+    yq eval -i \
+      ".spec.template.spec.containers[0].image = \"${{ steps.vars.outputs.FULL_IMAGE }}\"" \
+      applications/demo-app/deployment.yaml
+\end{lstlisting}
+
+\textbf{Commit and push to GitOps repo.} El commit incluye un mensaje con trazabilidad cruzada entre repositorios:
+
+\begin{lstlisting}
+- name: Commit and push to GitOps repo
+  run: |
+    cd gitops-repo
+    git config user.name "GitHub Actions CI"
+    git config user.email "actions@github.com"
+    git add applications/demo-app/deployment.yaml
+    git commit -m "chore: update demo-app image to ${{ steps.vars.outputs.SHORT_SHA }}"
+    git push origin main
+\end{lstlisting}
+
+El mensaje de commit incluye el SHA corto de la imagen (\texttt{steps.vars.outputs.SHORT\_SHA}), lo que permite auditar bidireccionalmente: dado un commit en \texttt{tfm-gitops}, es posible identificar la etiqueta de imagen desplegada, y dado un tag de imagen en Quay.io, es posible localizar el commit de código fuente que lo originó.
+
+\subsection{Evidencia empírica del ciclo completo}
+
+La Figura~\ref{fig:ci-git-log} muestra el historial de commits en el repositorio \texttt{tfm-gitops} tras la ejecución del pipeline completo. El commit más reciente (\texttt{f762c09}, \texttt{HEAD}) tiene el mensaje \texttt{chore: update demo-app image to d8ae0bd}, evidencia directa de que el pipeline actualizó automáticamente el repositorio GitOps con la nueva etiqueta de imagen.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{ci_cd/bloque5_logDeCommitAutomatico.png}
+\caption{Historial de commits en \texttt{tfm-gitops}: el commit automático \texttt{f762c09} actualiza la etiqueta de imagen a \texttt{d8ae0bd}, disparando la sincronización de ArgoCD}
+\label{fig:ci-git-log}
+\end{figure}
+
+Una vez detectado este nuevo commit por ArgoCD mediante su mecanismo de \textit{polling} del repositorio (y su \textit{watch} continuo sobre los recursos del clúster descrito en la Sección~7.5.1), el controlador de reconciliación inicia la sincronización del Deployment con la nueva especificación de imagen. La Figura~\ref{fig:ci-quay-tags} muestra el estado final del repositorio de imágenes en Quay.io, con las dos etiquetas publicadas por el pipeline: \texttt{defe4ef} (imagen con \texttt{python:3.13-slim}, 46.9~MiB) y \texttt{4888886} (imagen intermedia con \texttt{python:3.12-slim}, 47.2~MiB).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{ci_cd/bloque4_nuevoTAG.png}
+\caption{Repositorio \texttt{zelkarrabi/tfm-demo-app} en Quay.io: etiqueta \texttt{defe4ef} (imagen final con \texttt{python:3.13-slim}, 46.9~MiB) y etiqueta \texttt{4888886} (imagen previa con \texttt{python:3.12-slim})}
+\label{fig:ci-quay-tags}
+\end{figure}
+
+La Figura~\ref{fig:ci-pod-image} muestra la verificación final desde el clúster: los dos pods del Deployment \texttt{demo-app} en estado \texttt{Running} están ejecutando la imagen \texttt{quay.io/zelkarrabi/tfm-demo-app:d8ae0bd}, la etiqueta basada en el SHA corto del último commit que pasó todos los controles del pipeline.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{ci_cd/bloque5_podConImagenActualizada.png}
+\caption{Verificación en el clúster: los dos pods de \texttt{demo-app} en estado \texttt{Running} con la imagen \texttt{quay.io/zelkarrabi/\allowbreak{}tfm-demo-app:d8ae0bd} desplegada por ArgoCD}
+\label{fig:ci-pod-image}
+\end{figure}
+
+La vista del pod en la interfaz de ArgoCD, mostrada en la Figura~\ref{fig:ci-argocd-pod}, presenta el detalle completo del pod \texttt{demo-app-86d6c6d8f7-8s9c6} creado el 06/03/2026 a las 13:45:41: la imagen activa es \texttt{quay.io/zelkarrabi/tfm-demo-app@sha256:6279046da2c79968\ldots}, el estado del contenedor es \texttt{Running} (\textit{started and ready}) y el estado de salud del pod es \texttt{Healthy}. La referencia por digest SHA256 que aparece en el campo \texttt{imageID} del pod no la resuelve ArgoCD: es el kubelet quien, en el momento del pull, descarga la imagen referenciada por etiqueta y registra el digest exacto del manifiesto descargado; ArgoCD únicamente refleja ese valor live desde el estado del pod. El resultado práctico es inmutabilidad efectiva: aunque la etiqueta fuera redirigida en el registro a una imagen diferente, el pod en ejecución ya fijó el digest en su \texttt{imageID}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{ci_cd/bloque5_actualizadoImagenQuaypng.png}
+\caption{Detalle del pod \texttt{demo-app-86d6c6d8f7-8s9c6} en ArgoCD: imagen activa referenciada por digest SHA256, estado \texttt{Running} y salud \texttt{Healthy}}
+\label{fig:ci-argocd-pod}
+\end{figure}
+
+La prueba final de extremo a extremo consiste en verificar que el cambio introducido en el código fuente del repositorio \texttt{tfm-demo-app} es visible en la respuesta HTTP de la aplicación desplegada en el clúster. La Figura~\ref{fig:ci-curl-end-to-end} muestra la respuesta de la aplicación accedida en \texttt{192.168.1.101:8888}: el objeto JSON devuelto incluye el campo \texttt{ci\_pipeline:\,"end-to-end-test"}, valor de la variable de entorno \texttt{CI\_PIPELINE} configurada en el Deployment, que confirma que el código desplegado corresponde exactamente al commit que activó el pipeline. El campo \texttt{hostname:\,demo-app-7fdd54f645-4d5nk} identifica el pod específico que atendió la petición, y \texttt{service:\,tfm-demo-app} y \texttt{version:\,1.0.0} corresponden a los valores declarados en el código fuente de la aplicación.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.80\linewidth]{ci_cd/bloque5_curlMostrandoCambioCodigoFuente.png}
+\caption{Respuesta HTTP de la aplicación en \texttt{192.168.1.101:8888}: el campo \texttt{ci\_pipeline:\,end-to-end-test} confirma la propagación completa del cambio de código fuente al entorno de ejecución}
+\label{fig:ci-curl-end-to-end}
+\end{figure}
+
+\subsection{El ciclo DevSecOps completo}
+
+La combinación de los resultados documentados en este capítulo y en el Capítulo~7 constituye la materialización completa de la arquitectura DevSecOps diseñada en el Capítulo~5. El flujo end-to-end verificado empíricamente es el siguiente:
+
+\begin{enumerate}
+  \item Un desarrollador realiza un cambio en el código fuente de \texttt{tfm-demo-app} y hace \texttt{push} a la rama \texttt{main}.
+  \item GitHub Actions detecta el evento y lanza el workflow \textit{Build, Scan and Push to Quay}.
+  \item El pipeline construye la imagen Docker con el Dockerfile de multi-stage y usuario no root.
+  \item Trivy escanea la imagen; si se detecta alguna vulnerabilidad \texttt{HIGH} o \texttt{CRITICAL} con corrección disponible, el pipeline falla aquí.
+  \item Syft genera el SBOM de la imagen y lo sube como artefacto permanente de auditoría.
+  \item Grype analiza el SBOM; si se detecta alguna vulnerabilidad HIGH o superior, el pipeline falla aquí.
+  \item La imagen, libre de vulnerabilidades por encima del umbral, se publica en Quay.io bajo la etiqueta del SHA corto del commit.
+  \item El pipeline actualiza el campo \texttt{image} del Deployment en \texttt{tfm-gitops} mediante \texttt{yq} y hace commit con trazabilidad cruzada.
+  \item ArgoCD detecta el nuevo commit en \texttt{tfm-gitops} mediante su \textit{watch} sobre los recursos sincronizados y su ciclo de \textit{polling} Git, y sincroniza el Deployment con la nueva imagen.
+  \item Kubernetes crea los nuevos pods; Kyverno intercepta la solicitud de creación, aplica las políticas de mutación (P4--P7) y valida contra las políticas de validación (P1--P3, P9). Si el pod no satisface alguna condición no corregible mediante mutación, es rechazado.
+  \item Los nuevos pods pasan a estado \texttt{Running} y la aplicación responde HTTP con los valores del nuevo código fuente.
+\end{enumerate}
+
+Este flujo integra los tres planos de la arquitectura DevSecOps del Capítulo~5: el plano de desarrollo (código fuente y Git), el plano de automatización (GitHub Actions y ArgoCD) y el plano de ejecución (Kubernetes con Kyverno). La seguridad está integrada en cada transición entre planos: Trivy y Grype entre el plano de desarrollo y el registro de imágenes; las políticas de Kyverno entre el registro y el clúster; y ArgoCD como garante de que el estado del clúster permanece alineado con el repositorio de configuración.
+
+Con el ciclo CI/CD completo implementado y verificado empíricamente, el siguiente capítulo aborda la comparativa práctica entre Kyverno y OPA Gatekeeper, que complementa la revisión teórica del Capítulo~2 con evidencia obtenida mediante la reimplementación directa de un subconjunto representativo de las políticas del Capítulo~6 en el lenguaje Rego de OPA.
