@@ -72,7 +72,7 @@ El uso explícito del \texttt{GITOPS\_PAT} en lugar del \texttt{GITHUB\_TOKEN} p
 \section{La aplicación de demostración y los Dockerfiles}
 % ─────────────────────────────────────────────
 
-La aplicación de demostración es una aplicación Python Flask \cite{github_actions_docs} mínima cuya función es validar el ciclo CI/CD completo, no representar una carga de trabajo de producción real. Expone dos endpoints en el puerto~8080:
+La aplicación de demostración es una aplicación Python Flask mínima cuya función es validar el ciclo CI/CD completo, no representar una carga de trabajo de producción real. Expone dos endpoints en el puerto~8080:
 
 \begin{lstlisting}
 from flask import Flask, jsonify
@@ -219,9 +219,9 @@ La secuencia de pasos es la siguiente:
   \item \textbf{Login to Quay.io}: autenticación en \texttt{quay.io} con las credenciales del Robot Account almacenadas en los secretos \texttt{QUAY\_USER} y \texttt{QUAY\_PASSWORD}.
   \item \textbf{Build Docker image}: construcción de la imagen mediante \texttt{docker/build-push-action} con \texttt{push:\,false}, produciendo la imagen en el daemon local del runner sin publicarla.
   \item \textbf{Trivy vulnerability scan}: escaneo de la imagen local con Trivy, configurado para fallar el pipeline ante vulnerabilidades de severidad \texttt{HIGH} o \texttt{CRITICAL} (\texttt{ignore-unfixed: true}).
-  \item \textbf{Generate SBOM with Syft}: generación del Software Bill of Materials en formato CycloneDX mediante Syft \cite{syft_docs}, produciendo el fichero \texttt{sbom.cyclonedx.json}.
+  \item \textbf{Generate SBOM with Syft}: generación del Software Bill of Materials en formato syft-json (el formato nativo de Syft \cite{syft_docs}), produciendo el fichero \texttt{sbom.syft.json}.
   \item \textbf{Upload SBOM artifact}: subida del SBOM como artefacto del workflow, accesible desde la interfaz de GitHub Actions y descargable para auditoría posterior.
-  \item \textbf{Vulnerability scan with Grype}: análisis del SBOM CycloneDX con Grype \cite{grype_docs}, configurado para fallar ante vulnerabilidades de severidad \texttt{HIGH} o superior con corrección disponible (\texttt{--only-fixed}).
+  \item \textbf{Vulnerability scan with Grype}: análisis del SBOM con Grype \cite{grype_docs}, configurado para fallar ante vulnerabilidades de severidad \texttt{HIGH} o superior con corrección disponible (\texttt{--only-fixed}).
   \item \textbf{Push image to Quay}: publicación condicional de la imagen en el registro. Solo se ejecuta si todos los pasos de escaneo anteriores han tenido éxito.
   \item \textbf{Checkout GitOps repository}: clonado del repositorio \texttt{tfm-gitops} usando el \texttt{GITOPS\_PAT}.
   \item \textbf{Install yq}: instalación de \texttt{yq}, procesador YAML de línea de comandos.
@@ -272,7 +272,7 @@ Existen dos estándares principales para la especificación de SBOMs:
   \item \textbf{CycloneDX} \cite{cyclonedx_spec}: estándar de la OWASP Foundation, orientado específicamente a la seguridad y al ciclo de vida DevSecOps, con soporte nativo para análisis de vulnerabilidades y metadatos de riesgo.
 \end{itemize}
 
-El pipeline emite el SBOM en formato \textbf{CycloneDX} (\texttt{-o cyclonedx-json}), el estándar de OWASP orientado a DevSecOps, que Grype consume directamente. El artefacto generado (\texttt{sbom.cyclonedx.json}) se sube al workflow bajo el nombre \texttt{sbom-\$\{SHORT\_SHA\}}, asociándolo al run concreto y a la imagen correspondiente. La Figura~\ref{fig:ci-sbom-upload} muestra la ejecución exitosa del paso \textit{Upload SBOM artifact}: el fichero \texttt{sbom-defe4ef.zip} fue subido con un tamaño final de 490.279~bytes (ID de artefacto \texttt{7196257107}), accesible en la URL de artefactos del workflow \cite{syft_docs}.
+El pipeline emite el SBOM en formato \textbf{syft-json}, el formato nativo de Syft, que Grype consume directamente para el análisis de vulnerabilidades. El artefacto generado (\texttt{sbom.syft.json}) se sube al workflow bajo el nombre \texttt{sbom-\$\{SHORT\_SHA\}}, asociándolo al run concreto y a la imagen correspondiente. A diferencia de SPDX o CycloneDX, syft-json no es un estándar de interoperabilidad reconocido, sino el formato interno de la herramienta; en un entorno con requisitos de compliance formales, el pipeline podría emitir adicionalmente el SBOM en CycloneDX mediante \texttt{-o cyclonedx-json}. La Figura~\ref{fig:ci-sbom-upload} muestra la ejecución exitosa del paso \textit{Upload SBOM artifact}: el fichero \texttt{sbom-defe4ef.zip} fue subido con un tamaño final de 490.279~bytes (ID de artefacto \texttt{7196257107}), accesible en la interfaz de artefactos del workflow \cite{github_actions_docs}.
 
 \begin{figure}[H]
 \centering
@@ -323,11 +323,11 @@ La Figura~\ref{fig:ci-workflow-inicial} muestra el historial de las dos primeras
 
 Esta incidencia demuestra empíricamente una limitación real de la seguridad de la cadena de suministro en sistemas de CI basados en componentes de terceros: el anclaje por SHA protege únicamente frente a la mutación del código de la action referenciada directamente, pero no frente a las dependencias transitivas que esa action pueda resolver internamente mediante etiquetas mutables. En un entorno de producción, la mitigación completa requeriría o bien que los proveedores de actions anclen también sus dependencias internas por SHA, o bien el uso de un sistema de \textit{vendoring} que internalice todas las dependencias en el repositorio corporativo. La solución pragmática adoptada ---actualización al SHA de la versión estable con soporte activo--- es un compromiso aceptable que restaura la inmutabilidad del pipeline para la versión más reciente de la action.
 
-\subsection{Incidencia 2: reproducibilidad frente a frescura en la base de datos de Grype}
+\subsection{Incidencia 2: reproducibilidad frente a actualidad de la base de datos de Grype}
 
 La segunda incidencia afectó al paso \textit{Vulnerability scan with Grype} tras la incorporación del SBOM. Al fijar la versión de la imagen de Grype como \texttt{anchore/grype:v0.79.6}, la base de datos de vulnerabilidades incluida en esa imagen era estática y databa de la fecha de publicación de la imagen. Por defecto, Grype valida que su base de datos de CVEs no tenga más de 5~días de antigüedad; si el umbral se supera, Grype falla con un error antes de procesar el SBOM.
 
-Este comportamiento expone un \textit{trade-off} fundamental en el diseño de pipelines de seguridad: la \textbf{reproducibilidad} (versión fijada de la imagen, comportamiento determinístico del pipeline) entra en conflicto con la \textbf{frescura} (base de datos de CVEs actualizada, cobertura de las vulnerabilidades más recientes). Priorizar la reproducibilidad implica que el pipeline usará siempre la misma versión de Grype con la misma base de datos, pero esa base de datos se vuelve obsoleta con el tiempo. Priorizar la frescura implica que la imagen de Grype se actualiza automáticamente, pero introduce variabilidad en el comportamiento del pipeline (una ejecución puede fallar no porque la imagen tenga nuevas vulnerabilidades, sino porque la base de datos actualizada incorpora nuevas entradas).
+Este comportamiento expone un \textit{trade-off} fundamental en el diseño de pipelines de seguridad: la \textbf{reproducibilidad} (versión fijada de la imagen, comportamiento determinístico del pipeline) entra en conflicto con la \textbf{actualidad} de la base de datos (cobertura de las vulnerabilidades más recientes). Priorizar la reproducibilidad implica que el pipeline usará siempre la misma versión de Grype con la misma base de datos, pero esa base de datos se vuelve obsoleta con el tiempo. Priorizar la actualización de la base de datos implica que la imagen de Grype se actualiza automáticamente, pero introduce variabilidad en el comportamiento del pipeline (una ejecución puede fallar no porque la imagen tenga nuevas vulnerabilidades, sino porque la base de datos actualizada incorpora nuevas entradas).
 
 La solución adoptada fue configurar la variable de entorno \texttt{GRYPE\_DB\_VALIDATE\_AGE=false}, que instruye a Grype para que omita la validación de antigüedad y utilice la base de datos disponible en la imagen fijada:
 
@@ -338,7 +338,7 @@ La solución adoptada fue configurar la variable de entorno \texttt{GRYPE\_DB\_V
       -e GRYPE_DB_VALIDATE_AGE=false \
       -v "$PWD":/work \
       anchore/grype:v0.79.6 \
-      sbom:/work/sbom.cyclonedx.json \
+      sbom:/work/sbom.syft.json \
       --fail-on high \
       --only-fixed
 \end{lstlisting}
@@ -369,7 +369,7 @@ Esta decisión ejemplifica el principio \textit{Shift-Left} \cite{sharma2020devs
 
 La corrección se realizó mediante el commit \texttt{defe4ef} (\textit{fix: bump base image to python:3.13-slim to remediate High vulnerability}). La imagen resultante, publicada en Quay.io bajo la misma etiqueta, tiene 7~vulnerabilidades de severidad media y 8~corregibles con un tamaño de 46.9~MiB --- una reducción tanto en el número de CVEs como en el tamaño de la imagen, resultado esperado al usar una versión más moderna y parcheada de Python.
 
-\textbf{Nota sobre el Dockerfilevulnerable.} El escenario de bloqueo que el \texttt{Dockerfilevulnerable} (basado en \texttt{python:3.4-alpine}) habría permitido reproducir de forma artificial resultó innecesario: el propio pipeline de desarrollo produjo una prueba contrastada genuina al bloquear legítimamente una imagen que el equipo consideraba segura en ese momento (\texttt{python:3.12-slim}). Esta prueba real tiene mayor valor académico que una artificial porque demuestra el sistema funcionando en un escenario de producción donde las vulnerabilidades emergen sin previo aviso: ni el desarrollador eligió deliberadamente una imagen insegura, ni el bloqueo fue preparado. La CVE estaba presente en la base de datos de Grype, la imagen la contenía, y el pipeline hizo exactamente lo que fue diseñado para hacer.
+\textbf{Nota sobre el Dockerfilevulnerable.} El escenario de bloqueo que el \texttt{Dockerfilevulnerable} (basado en \texttt{python:\allowbreak{}3.4-alpine}) habría permitido reproducir de forma artificial resultó innecesario: el propio pipeline de desarrollo produjo una prueba contrastada genuina al bloquear legítimamente una imagen que el equipo consideraba segura en ese momento (\texttt{python:3.12-slim}). Esta prueba real tiene mayor valor académico que una artificial porque demuestra el sistema funcionando en un escenario de producción donde las vulnerabilidades emergen sin previo aviso: ni el desarrollador eligió deliberadamente una imagen insegura, ni el bloqueo fue preparado. La CVE estaba presente en la base de datos de Grype, la imagen la contenía, y el pipeline hizo exactamente lo que fue diseñado para hacer.
 
 % ─────────────────────────────────────────────
 \section{Cierre del ciclo CI/CD: integración con el repositorio GitOps}
@@ -436,12 +436,12 @@ La Figura~\ref{fig:ci-git-log} muestra el historial de commits en el repositorio
 \label{fig:ci-git-log}
 \end{figure}
 
-Una vez detectado este nuevo commit por ArgoCD mediante su mecanismo de \textit{polling} del repositorio (y su \textit{watch} continuo sobre los recursos del clúster descrito en la Sección~7.5.1), el controlador de reconciliación inicia la sincronización del Deployment con la nueva especificación de imagen. La Figura~\ref{fig:ci-quay-tags} muestra el estado final del repositorio de imágenes en Quay.io, con las dos etiquetas publicadas por el pipeline: \texttt{defe4ef} (imagen con \texttt{python:3.13-slim}, 46.9~MiB) y \texttt{4888886} (imagen intermedia con \texttt{python:3.12-slim}, 47.2~MiB).
+Una vez detectado este nuevo commit por ArgoCD mediante su mecanismo de \textit{polling} del repositorio (y su \textit{watch} continuo sobre los recursos del clúster descrito en la Sección~7.5.1), el controlador de reconciliación inicia la sincronización del \texttt{Deployment} con la nueva especificación de imagen. La Figura~\ref{fig:ci-quay-tags} muestra el histórico y estado del repositorio de imágenes en Quay.io, donde ahora se observan las cuatro etiquetas publicadas por las distintas ejecuciones del pipeline: destacando \texttt{d8ae0bd} como la imagen más reciente (46.9~MiB), junto con las versiones anteriores \texttt{036fe39}, \texttt{defe4ef} (imagen con \texttt{python:3.13-slim}, 46.9~MiB) y \texttt{4888886} (imagen inicial con \texttt{python:3.12-slim}, 47.2~MiB).
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.95\linewidth]{ci_cd/bloque4_nuevoTAG.png}
-\caption{Repositorio \texttt{zelkarrabi/tfm-demo-app} en Quay.io: etiqueta \texttt{defe4ef} (imagen final con \texttt{python:3.13-slim}, 46.9~MiB) y etiqueta \texttt{4888886} (imagen previa con \texttt{python:3.12-slim})}
+\caption{Repositorio \texttt{zelkarrabi/tfm-demo-app} en Quay.io mostrando el histórico de las cuatro etiquetas publicadas por el pipeline, con \texttt{d8ae0bd} como la imagen más reciente y segura.}
 \label{fig:ci-quay-tags}
 \end{figure}
 

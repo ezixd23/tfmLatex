@@ -104,7 +104,7 @@ La verificación empírica de este comportamiento se realiza inspeccionando el o
 kubectl get clusterpolicy disallow-root -o yaml | grep -A 50 "autogen:"
 \end{lstlisting}
 
-El \textit{output} de este comando muestra las reglas \texttt{autogen-require-run-as-non-root}, que cubre Deployments, StatefulSets, Jobs y CronJobs, y \texttt{autogen-cronjob-require-run-as-non-root}, que atiende el caso específico de \texttt{CronJob}. Estas reglas son generadas internamente por Kyverno y almacenadas en el objeto de la política en etcd; no requieren ninguna intervención manual del operador.
+El \textit{output} de este comando muestra las reglas \texttt{autogen-require-run-as-\allowbreak{}non-root}, que cubre Deployments, StatefulSets, Jobs y CronJobs, y \texttt{autogen-cronjob-require-run-as-\allowbreak{}non-root}, que atiende el caso específico de \texttt{CronJob}. Estas reglas son generadas internamente por Kyverno y almacenadas en el objeto de la política en etcd; no requieren ninguna intervención manual del operador.
 
 \subsubsection*{Comportamiento diferenciado: validate vs. mutate}
 
@@ -120,9 +120,9 @@ El mecanismo de autogen no se comporta de forma idéntica para todos los tipos d
 
 Las ocho políticas implementadas —P1 a P8— declaran \texttt{match.kinds:\,[Pod]}, pero gracias al mecanismo de autogen están cubriendo efectivamente Deployments, StatefulSets, Jobs y CronJobs. Esto significa que el alcance real del sistema de seguridad es significativamente mayor que el que se desprende de la lectura directa de los manifiestos.
 
-Este comportamiento se hizo evidente durante las fases iniciales de la implementación: los PolicyViolations generados por el Reports Controller incluían mensajes como \texttt{autogen-require-run-as-non-root} aplicándose sobre \texttt{Deployment} y \texttt{ReplicaSet} de los propios componentes de Kyverno y de \texttt{kube-system}, confirmando que la cobertura se extendía automáticamente a recursos de nivel superior sin haber declarado esos kinds en la política.
+Este comportamiento se hizo evidente durante las fases iniciales de la implementación: los PolicyViolations generados por el Reports Controller incluían mensajes como \texttt{autogen-\allowbreak{}require-\allowbreak{}run-as-non-root} aplicándose sobre \texttt{Deployment} y \texttt{ReplicaSet} de los propios componentes de Kyverno y de \texttt{kube-system}, confirmando que la cobertura se extendía automáticamente a recursos de nivel superior sin haber declarado esos kinds en la política.
 
-Kyverno permite controlar este comportamiento mediante la anotación \texttt{pod-policies.kyverno.io/\allowbreak{}autogen-controllers} en la \texttt{metadata} de la política, que acepta una lista explícita de controllers a cubrir o el valor \texttt{none} para desactivar autogen completamente. En este trabajo se utiliza el comportamiento por defecto, que ofrece la cobertura más amplia posible sin configuración adicional.
+Kyverno permite controlar este comportamiento mediante la anotación \texttt{pod-policies.\allowbreak{}kyverno.io/\allowbreak{}autogen-controllers} en la \texttt{metadata} de la política, que acepta una lista explícita de controllers a cubrir o el valor \texttt{none} para desactivar autogen completamente. En este trabajo se utiliza el comportamiento por defecto, que ofrece la cobertura más amplia posible sin configuración adicional.
 
 % ─────────────────────────────────────────────
 \section{Políticas de validación}
@@ -160,6 +160,8 @@ spec:
 La política opera mediante \textit{pattern matching}: Kyverno verifica que el campo \texttt{spec.security\allowbreak{}Context.\allowbreak{}runAsNonRoot} existe con el valor \texttt{true}. Si el campo está ausente o es \texttt{false}, el webhook devuelve un error de validación con el mensaje definido y la solicitud es rechazada.
 
 La justificación técnica de este control es doble. Por un lado, un proceso con \texttt{UID~0} dentro del contenedor hereda el conjunto completo de Linux capabilities asignado al mismo, incluyendo \texttt{CAP\_SYS\_ADMIN} y \texttt{CAP\_NET\_RAW}, que amplían significativamente la superficie de ataque. Por otro, si se produce un escape del aislamiento del contenedor —mediante una vulnerabilidad del runtime o del kernel—, un proceso que ya ejecutaba como root en el contenedor obtendrá privilegios de root sobre el nodo anfitrión, comprometiendo potencialmente la totalidad del clúster.
+
+La criticidad de este control queda patente al compararlo con distribuciones de Kubernetes orientadas a entornos empresariales. Red Hat OpenShift, por ejemplo, impide por defecto la ejecución de contenedores como root mediante sus Security Context Constraints (SCC), que se aplican automáticamente a todo pod desplegado sin necesidad de configuración adicional. Kubernetes nativo, en cambio, no impone ninguna restricción de este tipo de forma predeterminada: en una instalación estándar como la desplegada en este trabajo con \texttt{kubeadm}, un contenedor que se ejecute como root es admitido sin ninguna objeción. El hecho de que distribuciones empresariales bloqueen este comportamiento por defecto evidencia su criticidad y justifica la necesidad de implementar explícitamente un control como esta política en entornos de Kubernetes nativo.
 
 La prueba de validación aplica el siguiente pod, que no especifica ningún \texttt{securityContext}:
 
@@ -321,7 +323,7 @@ spec:
                 memory: "256Mi"
 \end{lstlisting}
 
-La inyección simultánea de \texttt{requests} y \texttt{limits} con los mismos valores —en lugar de únicamente \texttt{limits}— responde a una decisión técnicamente justificada. Kubernetes clasifica los pods en tres clases de calidad de servicio (\textit{QoS}) \cite{kubernetes_qos}: \texttt{Guaranteed} (cuando \texttt{requests\,==\,limits} para todos los contenedores), \texttt{Burstable} y \texttt{BestEffort}. Un pod con QoS \texttt{Guaranteed} es el último candidato a evicción cuando el nodo sufre presión de recursos. Adicionalmente, sin \texttt{requests} definidos, el Scheduler no dispone de información para las decisiones de \textit{bin-packing} y puede programar pods en nodos sin capacidad suficiente, resultando en fallos de OOM en tiempo de ejecución.
+La inyección simultánea de \texttt{requests} y \texttt{limits} con los mismos valores —en lugar de únicamente \texttt{limits}— responde a una decisión técnicamente justificada. Kubernetes clasifica los pods en tres clases de calidad de servicio (\textit{QoS}) \cite{kubernetes_qos}: \texttt{Guaranteed} (cuando \texttt{requests\,==\,limits} para todos los contenedores), \texttt{Burstable} y \texttt{BestEffort}. Un pod con QoS \texttt{Guaranteed} es el último candidato a \textit{eviction} cuando el nodo sufre presión de recursos. Adicionalmente, sin \texttt{requests} definidos, el Scheduler no dispone de información para las decisiones de \textit{bin-packing} y puede programar pods en nodos sin capacidad suficiente, resultando en fallos de OOM en tiempo de ejecución.
 
 La prueba despliega un pod sin ningún campo \texttt{resources} definido. Como muestra la Figura~\ref{fig:test4}, Kyverno inyecta los valores de \texttt{requests} y \texttt{limits} automáticamente, visibles en la salida de \texttt{kubectl get pod -o yaml}.
 

@@ -1,0 +1,277 @@
+\chapter{Comparativa práctica entre Kyverno y OPA Gatekeeper}
+
+El Capítulo~2 presentó en la Sección~2.5 una comparativa teórica entre Kyverno y OPA Gatekeeper, sintetizada en el Cuadro~2.1. El presente capítulo complementa esa visión con evidencia práctica: la reimplementación en el lenguaje Rego \cite{rego_docs} de un subconjunto representativo de las políticas del Capítulo~6, cubriendo los tres mecanismos del motor ---validación, mutación y generación---, de modo que las diferencias de sintaxis, modelo de objetos y capacidades puedan analizarse sobre código real.
+
+La comparativa se realiza a nivel de código, sin despliegue de OPA Gatekeeper en el clúster. Este enfoque responde a dos razones técnicas. Primera, la coexistencia de dos admission controllers en el mismo clúster es operativamente problemática: tanto Kyverno como Gatekeeper registran \texttt{MutatingWebhookConfiguration} y \texttt{ValidatingWebhookConfiguration} que interceptarían las mismas peticiones de admisión, generando comportamientos potencialmente confusos, mensajes de error duplicados y carga adicional sobre la API Server. Segunda, el entorno de laboratorio utilizado en el trabajo (dos máquinas virtuales con recursos compartidos) aloja un clúster Kubernetes ya operativo con Kyverno, ArgoCD y el pipeline de CI funcional; añadir un segundo motor de admisión sin impactar la estabilidad del entorno no es viable. La comparativa a nivel de código es, por tanto, la metodología adecuada para este contexto.
+
+El capítulo se organiza en cinco secciones. La primera describe el modelo de objetos de Gatekeeper para contextualizar la comparativa. Las secciones segunda y tercera comparan implementaciones concretas de políticas de validación y mutación respectivamente. La cuarta documenta la ausencia de equivalente en Gatekeeper para la capacidad de generación. La quinta sintetiza los hallazgos y justifica la elección de Kyverno para el entorno DevSecOps de este trabajo.
+
+% ─────────────────────────────────────────────
+\section{El modelo de OPA Gatekeeper}
+% ─────────────────────────────────────────────
+
+OPA Gatekeeper \cite{gatekeeper_docs} es un admission controller para Kubernetes que externaliza la evaluación de políticas al motor OPA (\textit{Open Policy Agent}) \cite{opa_docs}. A diferencia de Kyverno, cuyas políticas se expresan como manifiestos YAML nativos de Kubernetes, Gatekeeper requiere el lenguaje Rego \cite{rego_docs} ---un lenguaje declarativo de propósito general basado en lógica de primer orden--- para expresar la lógica de evaluación.
+
+El modelo de objetos de Gatekeeper se basa en dos recursos separados por política. El \textbf{ConstraintTemplate} define la lógica de la política en Rego y, al ser aplicado al clúster, genera dinámicamente un nuevo tipo de recurso CRD (Custom Resource Definition) cuyo nombre determina el autor. El \textbf{Constraint} instancia ese tipo de CRD para una configuración específica: define a qué recursos se aplica la política (mediante el campo \texttt{match}), a qué namespaces excluir, y opcionalmente pasa parámetros parametrizados al código Rego. Kyverno, en contraste, condensa ambos aspectos ---la lógica y la configuración de aplicación--- en un único objeto \texttt{ClusterPolicy}.
+
+La mutación en Gatekeeper \cite{gatekeeper_mutation} es un componente separado del núcleo de validación, habilitado de forma independiente y basado en tipos de objetos propios (\texttt{Assign}, \texttt{AssignMetadata}) que utilizan una sintaxis de localización distinta del Rego empleado para validación. Esta separación arquitectónica tiene implicaciones prácticas relevantes que se analizan en la Sección~9.3.
+
+% ─────────────────────────────────────────────
+\section{Comparativa en políticas de validación}
+% ─────────────────────────────────────────────
+
+\subsection{Política P1: \texttt{disallow-root}}
+
+La primera política impide el despliegue de pods que no declaren \texttt{runAsNonRoot:\,true} en su \texttt{securityContext}. Su implementación en Kyverno ---un único \texttt{ClusterPolicy} con un \texttt{pattern} que exige ese campo--- está documentada en la Sección~6.3.1. La implementación equivalente en Gatekeeper requiere dos objetos. El \texttt{ConstraintTemplate} contiene la lógica en Rego:
+
+\begin{lstlisting}
+# Gatekeeper - ConstraintTemplate (objeto 1/2)
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdisallowroot
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDisallowRoot
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sdisallowroot
+
+        violation[{"msg": msg}] {
+          not input.review.object.spec.securityContext.runAsNonRoot == true
+          msg := "Containers must not run as root"
+        }
+\end{lstlisting}
+
+El \texttt{Constraint} instancia la plantilla anterior para el tipo \texttt{Pod}:
+
+\begin{lstlisting}
+# Gatekeeper - Constraint (objeto 2/2)
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowRoot
+metadata:
+  name: disallow-root
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces:
+      - kyverno
+      - kube-system
+      - argocd
+\end{lstlisting}
+
+La comparación pone de manifiesto dos diferencias fundamentales. La primera es la \textbf{inversión del paradigma lógico}: Kyverno expresa el \textit{estado deseado} (el campo \texttt{runAsNonRoot} debe ser \texttt{true}), y el motor rechaza cualquier recurso que no coincida con ese patrón. Rego, en cambio, expresa la \textit{condición de violación} (la negación del estado correcto), y OPA ejecuta esa regla para determinar si existe infracción. Un desarrollador que lea la política de Kyverno ve directamente qué debe cumplir un pod; un desarrollador que lea el Rego necesita invertir mentalmente la condición para inferir el requisito. La segunda diferencia es el \textbf{conteo de objetos}: Kyverno resuelve la política en un único objeto de \textasciitilde20 líneas; Gatekeeper requiere dos objetos con un total de \textasciitilde30 líneas.
+
+Un aspecto donde Gatekeeper presenta una ventaja de concisión que debe reconocerse explícitamente es la \textbf{exclusión de namespaces}. El campo \texttt{excludedNamespaces} del Constraint es una lista plana de strings, directa y legible. La estructura equivalente en Kyverno requiere un bloque \texttt{exclude} anidado con niveles \texttt{any > resources > namespaces}, más verboso para una operación semánticamente simple:
+
+\begin{lstlisting}
+# Kyverno - bloque exclude (comparación de verbosidad)
+    exclude:
+      any:
+      - resources:
+          namespaces:
+          - kyverno
+          - kube-system
+          - argocd
+\end{lstlisting}
+
+\subsection{Política P3: \texttt{restrict-image-registries}}
+
+La tercera política restringe los registros de imágenes a un conjunto de fuentes verificadas. Su implementación en Kyverno ---un \texttt{ClusterPolicy} con \texttt{foreach} sobre los contenedores y el operador \texttt{AnyNotIn} sobre una lista de patrones glob--- está documentada en la Sección~6.3.3. La implementación en Gatekeeper separa la lógica Rego (con soporte de parámetros) del Constraint que los provee:
+
+\begin{lstlisting}
+# Gatekeeper - ConstraintTemplate (objeto 1/2)
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sallowedregistries
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sAllowedRegistries
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            prefixes:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sallowedregistries
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          image := container.image
+          not image_allowed(image)
+          msg := sprintf("Imagen no permitida: %v.", [image])
+        }
+
+        image_allowed(image) {
+          prefix := input.parameters.prefixes[_]
+          startswith(image, prefix)
+        }
+\end{lstlisting}
+
+\begin{lstlisting}
+# Gatekeeper - Constraint (objeto 2/2)
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRegistries
+metadata:
+  name: restrict-image-registries
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces:
+      - kyverno
+      - kube-system
+      - argocd
+  parameters:
+    prefixes:
+      - "docker.io/"
+      - "ghcr.io/"
+      - "registry.k8s.io/"
+      - "quay.io/"
+      - "nginx"
+      - "alpine"
+      - "busybox"
+      - "nginxinc/"
+\end{lstlisting}
+
+Esta comparación es la más rica del capítulo porque ambas implementaciones resuelven el mismo problema de iteración sobre contenedores y comprobación contra una lista. El análisis revela tres diferencias significativas.
+
+\textbf{Primera: el mecanismo de matching no es idéntico.} Kyverno usa \texttt{AnyNotIn} con patrones glob (\texttt{docker.io/*}), que realiza \textit{glob matching}. Rego usa \texttt{startswith}, que realiza \textit{prefix matching}. Para los patrones concretos de esta política el resultado práctico es equivalente, pero el mecanismo subyacente difiere. Este detalle ilustra que la reimplementación de una política entre herramientas raramente es una traducción literal: es una adaptación que preserva la intención de la política pero puede diferir en el mecanismo preciso de evaluación.
+
+\textbf{Segunda: la parametrización es una ventaja estructural de Gatekeeper.} La arquitectura ConstraintTemplate + Constraint separa explícitamente la lógica (el código Rego, que no cambia) de los datos (la lista de prefijos, definida en el Constraint con un schema validado mediante \texttt{openAPIV3Schema}). Esto permite reutilizar exactamente el mismo ConstraintTemplate para distintos Constraints con distintas listas de prefijos autorizados, por ejemplo en organizaciones con equipos que tienen diferentes políticas de registros. En Kyverno la lista está embebida en la política y no hay mecanismo nativo equivalente de parametrización; cualquier variación requiere una política distinta.
+
+\textbf{Tercera: la diferencia de paradigma de expresividad.} Kyverno es puramente declarativo: el bloque \texttt{foreach} + \texttt{AnyNotIn} expresa la intención en YAML sin necesidad de funciones auxiliares. Rego ofrece la expresividad de un lenguaje de programación ---con iteradores (\texttt{[\_]}), funciones auxiliares (\texttt{image\_allowed}) y llamadas a funciones built-in (\texttt{startswith}, \texttt{sprintf})--- que puede resultar ventajosa para lógica muy compleja, pero que introduce una curva de aprendizaje significativamente mayor para equipos sin experiencia en el lenguaje.
+
+% ─────────────────────────────────────────────
+\section{Comparativa en políticas de mutación}
+% ─────────────────────────────────────────────
+
+Esta sección es la de mayor peso argumental del capítulo, dado que la mutación ---el hardening automático de pods en el momento de admisión--- es el mecanismo central de la arquitectura diseñada en este trabajo. Se compara la política P5 (\texttt{add-default-securitycontext}), que inyecta simultáneamente \texttt{allowPrivilegeEscalation:\,false} y \texttt{capabilities.drop:\,[ALL]} en todos los contenedores.
+
+La política P5 en Kyverno ---un único \texttt{ClusterPolicy} con \texttt{patchStrategicMerge} y selector \texttt{(name):\,"*"} que inyecta ambos campos simultáneamente--- está documentada en la Sección~6.4.2. La implementación equivalente en Gatekeeper requiere un objeto \texttt{Assign} separado por cada campo a mutar \cite{gatekeeper_mutation}. El primero gestiona \texttt{allowPrivilegeEscalation}:
+
+\begin{lstlisting}
+# Gatekeeper - Assign (objeto 1/2): allowPrivilegeEscalation
+apiVersion: mutations.gatekeeper.sh/v1
+kind: Assign
+metadata:
+  name: add-allow-privilege-escalation
+spec:
+  applyTo:
+    - groups: [""]
+      kinds: ["Pod"]
+      versions: ["v1"]
+  match:
+    scope: Namespaced
+    kinds:
+      - apiGroups: ["*"]
+        kinds: ["Pod"]
+  location: "spec.containers[name:*].securityContext.allowPrivilegeEscalation"
+  parameters:
+    assign:
+      value: false
+\end{lstlisting}
+
+El segundo gestiona \texttt{capabilities.drop}:
+
+\begin{lstlisting}
+# Gatekeeper - Assign (objeto 2/2): capabilities.drop
+apiVersion: mutations.gatekeeper.sh/v1
+kind: Assign
+metadata:
+  name: add-drop-all-capabilities
+spec:
+  applyTo:
+    - groups: [""]
+      kinds: ["Pod"]
+      versions: ["v1"]
+  match:
+    scope: Namespaced
+    kinds:
+      - apiGroups: ["*"]
+        kinds: ["Pod"]
+  location: "spec.containers[name:*].securityContext.capabilities.drop"
+  parameters:
+    assign:
+      value: ["ALL"]
+\end{lstlisting}
+
+El contraste es directo: una única política de Kyverno de 18 líneas reemplaza dos objetos \texttt{Assign} de 18 líneas cada uno. Pero la diferencia va más allá del conteo de líneas.
+
+La primera limitación de la mutación en Gatekeeper es la \textbf{fragmentación del modelo de objetos}. En Kyverno, validación y mutación utilizan exactamente el mismo tipo de recurso (\texttt{ClusterPolicy}): el operador aprende un único modelo y cambia la acción de \texttt{validate} a \texttt{mutate}. En Gatekeeper, la validación usa ConstraintTemplate + Constraint con lógica en Rego, mientras que la mutación usa objetos \texttt{Assign} con una sintaxis de localización propia (\texttt{location:\,"spec.containers[name:*]..."}) que es un mini-lenguaje diferente tanto del Rego como del patchStrategicMerge de Kyverno. El operador debe dominar dos modelos conceptuales distintos dentro de la misma herramienta.
+
+La segunda limitación es la \textbf{arquitectura separada del componente de mutación}. La mutación en Gatekeeper es un subsistema históricamente experimental habilitado de forma independiente del núcleo de validación \cite{gatekeeper_mutation}: requiere una configuración adicional y no está disponible en todos los despliegues por defecto. Kyverno no tiene esta distinción: mutación y validación son ciudadanos de primera clase del mismo motor desde su diseño original.
+
+La tercera limitación es la \textbf{ausencia de mutación estructural agregada}. El mecanismo \texttt{patchStrategicMerge} de Kyverno permite describir una estructura completa de seguridad ---con múltiples campos anidados--- y aplicarla en una sola operación de parche. Gatekeeper no tiene un mecanismo equivalente: cada campo a mutar requiere un objeto \texttt{Assign} independiente. Para una política de hardening que modifique cinco campos del \texttt{securityContext}, Gatekeeper requeriría cinco objetos \texttt{Assign}; Kyverno los resuelve con un único \texttt{patchStrategicMerge}.
+
+Para un caso de uso centrado en el hardening automático mediante mutación ---como es el de este trabajo---, la diferencia es determinante en términos de ergonomía, coherencia del modelo y mantenibilidad operativa.
+
+% ─────────────────────────────────────────────
+\section{La generación de recursos: una capacidad exclusiva de Kyverno}
+% ─────────────────────────────────────────────
+
+La política P8 (\texttt{generate-networkpolicy-metadata}), descrita en la Sección~6.5.1, genera automáticamente una NetworkPolicy que bloquea el acceso al IMDS en cada namespace creado, con \textit{drift protection} activada mediante \texttt{synchronize:\,true}. Para esta política no es posible mostrar una implementación equivalente en Gatekeeper porque la capacidad no existe en la herramienta.
+
+OPA Gatekeeper es, por diseño arquitectónico, un motor de \textit{admisión}: intercepta peticiones de la API Server para aceptarlas, rechazarlas o modificarlas en el momento de su procesamiento, pero no puede generar recursos derivados como respuesta a un evento. Crear una NetworkPolicy en un namespace como reacción a la creación de dicho namespace requiere un \textit{generador de recursos}, una capacidad que pertenece al plano de control reactivo y que está fuera del alcance del modelo de admission controller de Gatekeeper \cite{gatekeeper_docs}.
+
+Esta ausencia tiene consecuencias directas para la seguridad. La política P8 implementa un control relevante ---el bloqueo del IMDS, vector de ataque documentado en el incidente de Capital One \cite{capitalone2019}--- con garantía de auto-reparación: si la NetworkPolicy es eliminada accidentalmente o por un actor malicioso, Kyverno la regenera automáticamente. La replicación de esta garantía en un entorno basado en Gatekeeper requeriría componentes adicionales externos al motor de políticas: un operador Kubernetes personalizado, un controlador dedicado o herramientas de terceros. Esto aumenta la complejidad operativa y fragmenta la responsabilidad de la seguridad entre múltiples componentes.
+
+La imposibilidad de reproducir P8 en Gatekeeper cierra la justificación técnica de la elección de Kyverno para este trabajo de forma definitiva: no se trata solo de una preferencia de ergonomía, sino de una diferencia de capacidad funcional ante un requisito de seguridad concreto.
+
+% ─────────────────────────────────────────────
+\section{Síntesis comparativa y justificación de la elección}
+% ─────────────────────────────────────────────
+
+El Cuadro~\ref{tab:kyverno-gatekeeper} sintetiza los hallazgos del capítulo, presentando tanto los aspectos en que Kyverno presenta ventajas como aquellos en que Gatekeeper las presenta.
+
+\begin{table}[H]
+\centering
+\caption{Comparativa práctica entre Kyverno y OPA Gatekeeper}
+\label{tab:kyverno-gatekeeper}
+\small
+\begin{tabular}{p{4.2cm} p{4.5cm} p{4.5cm}}
+\toprule
+\textbf{Aspecto} & \textbf{Kyverno} & \textbf{OPA Gatekeeper} \\
+\midrule
+Objetos por política de validación & 1 (\texttt{ClusterPolicy}) & 2 (\texttt{ConstraintTemplate} + \texttt{Constraint}) \\
+\addlinespace
+Lenguaje de validación & YAML declarativo (\texttt{pattern}) & Rego \\
+\addlinespace
+Paradigma de la condición & Estado deseado & Condición de violación \\
+\addlinespace
+Mutación & Nativa, integrada, mismo modelo & Componente separado, históricamente beta \\
+\addlinespace
+Mutación multi-campo & Una política (\texttt{patchStrategicMerge}) & Un objeto \texttt{Assign} por campo \\
+\addlinespace
+Lenguaje de mutación & Mismo modelo que validación & Sintaxis \texttt{location} propia, distinta de Rego \\
+\addlinespace
+Generación de recursos & Sí (\texttt{generate} + \textit{drift protection}) & No \\
+\addlinespace
+Exclusión de namespaces & Bloque \texttt{exclude} anidado (verboso) & Campo \texttt{excludedNamespaces} (conciso) \\
+\addlinespace
+Parametrización & Lista embebida en la política & Template reutilizable + Constraint parametrizado \\
+\addlinespace
+Curva de aprendizaje & Baja (solo YAML) & Alta (Rego + sintaxis de mutación) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+La comparativa revela ventajas reales en ambas herramientas que deben reconocerse para que la evaluación sea académicamente sólida. Gatekeeper presenta una ventaja estructural en \textbf{parametrización y reutilización}: la separación entre ConstraintTemplate y Constraint permite definir una plantilla Rego una sola vez y desplegarla con configuraciones distintas en múltiples Constraints, un patrón muy útil en organizaciones grandes con decenas de equipos que requieren variaciones de la misma política base. La concisión de \texttt{excludedNamespaces} frente al bloque \texttt{exclude} de Kyverno también es una ventaja real. Rego, además, ofrece mayor poder expresivo para implementar lógica de validación compleja que exceda las capacidades declarativas de Kyverno.
+
+Sin embargo, para el caso de uso concreto de este trabajo ---un entorno DevSecOps donde el hardening automático mediante mutación y la generación de recursos con auto-reparación son requisitos centrales---, Kyverno es la elección más adecuada por tres razones que emergen directamente de la comparativa práctica. \textbf{Primera}, la mutación en Kyverno es nativa, coherente con el modelo de validación y capaz de aplicar transformaciones estructurales complejas en un único objeto; en Gatekeeper la mutación introduce fragmentación de modelo y limitaciones funcionales. \textbf{Segunda}, la generación de recursos con \textit{drift protection} ---implementada en P8 y sin equivalente posible en Gatekeeper--- resuelve un requisito de seguridad concreto con una garantía de auto-reparación que ninguna alternativa simple puede replicar. \textbf{Tercera}, la curva de aprendizaje de Kyverno es sustancialmente menor: el equipo que opera la plataforma solo necesita dominar YAML con sintaxis Kyverno, mientras que Gatekeeper requiere adicionalmente el lenguaje Rego ---un lenguaje de propósito general con semántica propia--- y una sintaxis de localización adicional para la mutación.
+
+La comparativa práctica confirma y refuerza con evidencia de código las diferencias que el Cuadro~2.1 del Capítulo~2 anticipaba teóricamente: la elección de Kyverno no fue una preferencia arbitraria, sino la decisión técnica más adecuada para un conjunto de requisitos en el que la mutación automática y la generación de recursos son capacidades no negociables.
